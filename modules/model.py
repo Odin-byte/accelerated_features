@@ -7,6 +7,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from modules.cyclic_polar_coordinate_conv import CyclicPolarCoordinateConvLayer
 import time
 
 class BasicLayer(nn.Module):
@@ -75,6 +76,11 @@ class XFeatModel(nn.Module):
 										BasicLayer(64, 64, stride=1),
 										nn.Conv2d (64, 64, 1, padding=0)
 									 )
+		
+		# Add CyclicPolarCoordinateConvLayer to feats and heatmap heads
+		self.cyclic_feats = CyclicPolarCoordinateConvLayer(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1)
+		self.cyclic_heatmap = CyclicPolarCoordinateConvLayer(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1)
+
 
 		self.heatmap_head = nn.Sequential(
 										BasicLayer(64, 64, 1, padding=0),
@@ -145,10 +151,14 @@ class XFeatModel(nn.Module):
 		#pyramid fusion
 		x4 = F.interpolate(x4, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
 		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
-		feats = self.block_fusion( x3 + x4 + x5 )
 
-		#heads
-		heatmap = self.heatmap_head(feats) # Reliability map
+		fused = self.block_fusion(x3 + x4 + x5)
+		# Apply CyclicPolarCoordinateConvLayer to feats
+		feats = self.cyclic_feats(fused)
+
+		# Apply CyclicPolarCoordinateConvLayer to heatmap
+		heatmap_input = self.cyclic_heatmap(feats)
+		heatmap = self.heatmap_head(heatmap_input)  # Reliability map
 		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
 
 		return feats, keypoints, heatmap

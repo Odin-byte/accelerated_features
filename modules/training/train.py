@@ -406,7 +406,10 @@ class Trainer():
                 for b in range(len(positives_c)):
                     #Get positive correspondencies
                     pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:]
-
+                    
+                    #TODO: Calculate the polar indxs of the keypoints found in the cartesian space
+                    
+                
                     #Grab features at corresponding idxs
                     m1 = feats1[b, :, pts1[:,1].long(), pts1[:,0].long()].permute(1,0)
                     m2 = feats2[b, :, pts2[:,1].long(), pts2[:,0].long()].permute(1,0)

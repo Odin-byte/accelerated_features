@@ -257,7 +257,6 @@ class Trainer():
                 loss = torch.cat(loss_items, -1).mean()
                 loss_coarse = loss_ds.item()
                 loss_coord = loss_coords.item()
-                loss_coord = loss_coords.item()
                 loss_kp_pos = loss_kp_pos.item()
                 loss_l1 = loss_kp.item()
 

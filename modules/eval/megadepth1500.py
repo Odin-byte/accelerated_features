@@ -244,6 +244,8 @@ def parse_args():
                         help="Matcher to use (xfeat or alike)")
     parser.add_argument('--ransac-thr', type=float, default=2.5,
                         help="RANSAC threshold value in pixels (default: 2.5)")
+    parser.add_argument('--weights-path', type=str, required=False, default=None
+                        help="Path to custom weights / pt file if wanted.")
     return parser.parse_args()
 
 
@@ -259,7 +261,10 @@ if __name__ == '__main__':
     if args.matcher == 'xfeat':
         print("Running benchmark for XFeat..")
         from modules.xfeat import XFeat
-        xfeat = XFeat()
+        if args.weights_path == None:
+            xfeat = XFeat()
+        else:
+            xfeat = XFeat(weights=args.weights_path)
         run_pose_benchmark(matcher_fn = xfeat.match_xfeat, loader = loader, ransac_thr = args.ransac_thr)
 
     elif args.matcher == 'xfeat-star':

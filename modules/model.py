@@ -40,6 +40,12 @@ class XFeatModel(nn.Module):
 
 		self.skip1 = nn.Sequential(	 nn.AvgPool2d(4, stride = 4),
 			  						 nn.Conv2d (1, 24, 1, stride = 1, padding=0) )
+		
+		# Main backbone
+
+		# CyclicPolarCoordinateConvLayer
+
+		self.cyclic_polar_conv = CyclicPolarCoordinateConvLayer(in_channels=1, out_channels=1, kernel_size=3, stride=1, padding=1)
 
 		self.block1 = nn.Sequential(
 										BasicLayer( 1,  4, stride=1),
@@ -142,8 +148,9 @@ class XFeatModel(nn.Module):
 			x = self.norm(x)
 
 		#main backbone
-		x1 = self.block1(x)
-		x2 = self.block2(x1 + self.skip1(x))
+		polar_x = self.cyclic_polar_conv(x)
+		x1 = self.block1(polar_x)
+		x2 = self.block2(x1 + self.skip1(polar_x))
 		x3 = self.block3(x2)
 		x4 = self.block4(x3)
 		x5 = self.block5(x4)
@@ -153,12 +160,23 @@ class XFeatModel(nn.Module):
 		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
 
 		fused = self.block_fusion(x3 + x4 + x5)
-		# Apply CyclicPolarCoordinateConvLayer to feats
-		feats = self.cyclic_feats(fused)
+		
+		feats = fused
 
-		# Apply CyclicPolarCoordinateConvLayer to heatmap
-		heatmap_input = self.cyclic_heatmap(feats)
+		heatmap_input = feats
 		heatmap = self.heatmap_head(heatmap_input)  # Reliability map
 		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
 
 		return feats, keypoints, heatmap
+	
+
+if __name__ == "__main__":
+		# Test the model
+		model = XFeatModel()
+		x = torch.randn(1, 1, 256, 256)  # Example input tensor
+		feats, keypoints, heatmap = model(x)
+
+		print("Output shapes:")
+		print("keypoints shape:", keypoints.shape)
+		print("feats shape:", feats.shape)
+		print("heatmap shape:", heatmap.shape)

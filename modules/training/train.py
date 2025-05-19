@@ -405,10 +405,8 @@ class Trainer():
 
                 for b in range(len(positives_c)):
                     #Get positive correspondencies
-                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:]
-                    
-                    #TODO: Calculate the polar indxs of the keypoints found in the cartesian space
-                    
+                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:] # This point are already in feature map space and computed by the warper
+                    # Therefore we do not need to calcuate the polar indices
                 
                     #Grab features at corresponding idxs
                     m1 = feats1[b, :, pts1[:,1].long(), pts1[:,0].long()].permute(1,0)

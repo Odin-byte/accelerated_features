@@ -11,7 +11,7 @@ from kornia.utils import create_meshgrid
 import matplotlib.pyplot as plt
 import pdb
 import cv2
-
+from modules.training.utils import map_cyclic_polar_feature_coords_to_img_coords, map_img_coords_to_cyclic_polar_feature_coords
 from modules.training.utils import plot_corrs
 
 @torch.no_grad()
@@ -83,7 +83,7 @@ def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
 
 
 @torch.no_grad()
-def spvs_coarse(data, scale = 8):
+def spvs_coarse(data, scale_h = 10.666, scale_w = 4.0, scale_lin_conv = 8):
     """
         Supervise corresp with dense depth & camera poses
     """
@@ -93,15 +93,26 @@ def spvs_coarse(data, scale = 8):
     N, _, H0, W0 = data['image0'].shape
     _, _, H1, W1 = data['image1'].shape
     #scale = 8
-    scale0 = scale * data['scale0'][:, None] if 'scale0' in data else scale
-    scale1 = scale * data['scale1'][:, None] if 'scale1' in data else scale
-    h0, w0, h1, w1 = map(lambda x: x // scale, [H0, W0, H1, W1])
+    # scale0 and scale1 are the scales for h and w for each image in the batch
+    # these image specific scales need to be multiplied by the scale of the network
+    # to get the final scale for the image before the cyclic convolution
+    scale0 = torch.tensor([scale_h, scale_w], device=device) * data['scale0'][:, None] if 'scale0' in data else torch.tensor([scale_h, scale_w], device=device)[None, None, :]
+    scale1 = torch.tensor([scale_h, scale_w], device=device) * data['scale1'][:, None] if 'scale1' in data else torch.tensor([scale_h, scale_w], device=device)[None, None, :]
+    
+    h0, h1 = H0 / scale_h, H1 / scale_h
+    w0, w1 = W0 / scale_w, W1 / scale_w
+
+    h1 = int(h1)
+    w1 = int(w1)
 
     # 2. warp grids
     # create kpts in meshgrid and resize them to image resolution
     grid_pt1_c = create_meshgrid(h1, w1, False, device).reshape(1, h1*w1, 2).repeat(N, 1, 1)    # [N, hw, 2]
-    grid_pt1_i = scale1 * grid_pt1_c
-
+    # Move to grid points from feature space to image space
+    # Scale the grid points by the linear scale of the standard convolution layers
+    grid_pt1_i = 8 * grid_pt1_c
+    # Apply the non linear mapping
+    grid_pt1_i = map_cyclic_polar_feature_coords_to_img_coords(grid_pt1_i, H0, W0, kernel_size=3, stride=1, padding=1)
     # warp kpts bi-directionally and check reproj error
     nonzero_m1, w_pt1_i  =  warp_kpts(grid_pt1_i, data['depth1'], data['depth0'], data['T_1to0'], data['K1'], data['K0']) 
     nonzero_m2, w_pt1_og =  warp_kpts(   w_pt1_i, data['depth0'], data['depth1'], data['T_0to1'], data['K0'], data['K1']) 
@@ -120,20 +131,56 @@ def spvs_coarse(data, scale = 8):
     for pts in batched_corrs:
         lut_mat12 = torch.ones((h1, w1, 4), device = device, dtype = torch.float32) * -1
         lut_mat21 = torch.clone(lut_mat12)
-        src_pts = pts[:, :2] / scale
-        tgt_pts = pts[:, 2:] / scale
+        # src_pts_cyclic = map_img_coords_to_cyclic_polar_feature_coords(
+        #             src_pts, rh, rw, kernel_size=3, stride=1, padding=1
+        #         )
+        # Move the points from image space to feature space
+        src_pts = map_img_coords_to_cyclic_polar_feature_coords(
+            pts[:, :2], H0, W0, kernel_size=3, stride=1, padding=1
+        )
+        tgt_pts = map_img_coords_to_cyclic_polar_feature_coords(
+            pts[:, 2:], H1, W1, kernel_size=3, stride=1, padding=1
+        )
+        src_pts = pts[:, :2] / scale_lin_conv
+        tgt_pts = pts[:, 2:] / scale_lin_conv
+
         try:
-            lut_mat12[src_pts[:,1].long(), src_pts[:,0].long()] = torch.cat([src_pts, tgt_pts], dim=1)
+            # Compute integer indices
+            y_idx = src_pts[:, 1].long()
+            x_idx = src_pts[:, 0].long()
+            # Create a mask for valid indices
+            valid_mask = (
+                (y_idx >= 0) & (y_idx < lut_mat12.shape[0]) &
+                (x_idx >= 0) & (x_idx < lut_mat12.shape[1])
+            )
+            # Filter only valid points
+            y_idx = y_idx[valid_mask]
+            x_idx = x_idx[valid_mask]
+            src_pts_valid = src_pts[valid_mask]
+            tgt_pts_valid = tgt_pts[valid_mask]
+            # Assign only valid points to the lookup table
+            lut_mat12[y_idx, x_idx] = torch.cat([src_pts_valid, tgt_pts_valid], dim=1)
             mask_valid12 = torch.all(lut_mat12 >= 0, dim=-1)
             points = lut_mat12[mask_valid12]
 
-            #Target-src check
+            # Target-src check
             src_pts, tgt_pts = points[:, :2], points[:, 2:]
-            lut_mat21[tgt_pts[:,1].long(), tgt_pts[:,0].long()] = torch.cat([src_pts, tgt_pts], dim=1)
+            y_idx = tgt_pts[:, 1].long()
+            x_idx = tgt_pts[:, 0].long()
+            valid_mask = (
+                (y_idx >= 0) & (y_idx < lut_mat21.shape[0]) &
+                (x_idx >= 0) & (x_idx < lut_mat21.shape[1])
+            )
+            y_idx = y_idx[valid_mask]
+            x_idx = x_idx[valid_mask]
+            src_pts_valid = src_pts[valid_mask]
+            tgt_pts_valid = tgt_pts[valid_mask]
+            lut_mat21[y_idx, x_idx] = torch.cat([src_pts_valid, tgt_pts_valid], dim=1)
             mask_valid21 = torch.all(lut_mat21 >= 0, dim=-1)
             points = lut_mat21[mask_valid21]
 
             corrs.append(points)
+            print(f"Number of correspondences found: {len(points)}")
         except:
             pdb.set_trace()
             print('..')

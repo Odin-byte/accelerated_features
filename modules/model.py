@@ -160,9 +160,8 @@ class XFeatModel(nn.Module):
 		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
 
 		fused = self.block_fusion(x3 + x4 + x5)
-		
-		feats = fused
 
+		feats = fused
 		heatmap_input = feats
 		heatmap = self.heatmap_head(heatmap_input)  # Reliability map
 		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
@@ -173,10 +172,17 @@ class XFeatModel(nn.Module):
 if __name__ == "__main__":
 		# Test the model
 		model = XFeatModel()
-		x = torch.randn(1, 1, 256, 256)  # Example input tensor
+		x = torch.randn(1, 1, 800, 608)  # Example input tensor
 		feats, keypoints, heatmap = model(x)
 
+		print("Input shape:", x.shape)
 		print("Output shapes:")
 		print("keypoints shape:", keypoints.shape)
 		print("feats shape:", feats.shape)
 		print("heatmap shape:", heatmap.shape)
+
+		# Calculate ratio between input and feature map size for x an y
+		ratio_x = x.shape[2] / feats.shape[2]
+		ratio_y = x.shape[3] / feats.shape[3]
+		print("Ratio x:", ratio_x)
+		print("Ratio y:", ratio_y)

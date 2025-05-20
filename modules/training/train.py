@@ -358,10 +358,10 @@ class Trainer():
                             d[k] = d[k].to(self.dev)
                 
                     p1, p2 = d['image0'], d['image1']
-                    positives_md_coarse = megadepth_warper.spvs_coarse(d, 8)
+                    positives_md_coarse = megadepth_warper.spvs_coarse(d)
 
                 if self.augmentor is not None:
-                    h_coarse, w_coarse = p1s[0].shape[-2] // 8, p1s[0].shape[-1] // 8
+                    h_coarse, w_coarse = p1s[0].shape[-2] // 10.6666, p1s[0].shape[-1] // 4 # Hardcoded scaling factors adapted by adding the influence of the cyclic conv
                     _ , positives_s_coarse = get_corresponding_pts(p1s, p2s, H1, H2, self.augmentor, h_coarse, w_coarse)
 
                 if self.plot_test:
@@ -405,7 +405,7 @@ class Trainer():
 
                 for b in range(len(positives_c)):
                     #Get positive correspondencies
-                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:] # This point are already in feature map space and computed by the warper
+                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:] # This points are already in feature map space and computed by the warper
                     # Therefore we do not need to calcuate the polar indices
                 
                     #Grab features at corresponding idxs

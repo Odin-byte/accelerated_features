@@ -183,7 +183,7 @@ class XFeat(nn.Module):
 
 		idxs0, idxs1 = self.match(out1['descriptors'], out2['descriptors'], min_cossim=min_cossim )
 
-		return out1['keypoints'][idxs0].cpu().numpy(), out2['keypoints'][idxs1].cpu().numpy()
+		return out1['keypoints'][idxs0].cpu().numpy(), out2['keypoints'][idxs1].cpu().numpy(), idxs0
 
 	@torch.inference_mode()
 	def match_xfeat_star(self, im_set1, im_set2, top_k = None):

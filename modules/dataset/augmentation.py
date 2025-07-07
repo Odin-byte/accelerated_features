@@ -109,7 +109,6 @@ class AugmentationPipe(nn.Module):
         self.batch_size = batch_size
         self.out_resolution = out_resolution 
         self.sides_crop = sides_crop
-        self.max_num_imgs = max_num_imgs
         self.num_test_imgs = num_test_imgs
         self.dims_t = torch.tensor([int(self.dims[0]*(1. - self.sides_crop)) - int(self.dims[0]*self.sides_crop) -1,
                                     int(self.dims[1]*(1. - self.sides_crop)) - int(self.dims[1]*self.sides_crop) -1]).float().to(device).view(1,1,2)
@@ -117,6 +116,7 @@ class AugmentationPipe(nn.Module):
                                      self.dims_t[0,0,1] / out_resolution[1]]).float().to(device).view(1,1,2) 
 
         self.all_imgs = glob.glob(img_dir + '/*.jpg') + glob.glob(img_dir + '/*.png')
+        self.max_num_imgs = len(self.all_imgs) - self.num_test_imgs
         
         self.photometric = photometric
         self.geometric = geometric

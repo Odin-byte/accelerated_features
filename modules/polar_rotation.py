@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import math
+import cv2
+import torchvision.transforms as transforms
 
 
 class PolarRotationTransform():
@@ -94,67 +96,134 @@ class PolarRotationTransform():
         output = F.interpolate(output, size=(new_height, W), mode='nearest')
 
         return output
-
     
-    def test_polar_sample(self):
-        torch.manual_seed(0)
-        input = torch.rand(1, 3, 5, 5)
 
-        output_loop = self.transform(input)
-        output_vector = self.polar_transform(input)
-
-        print(output_loop.shape)
-        print(output_vector.shape)
-
-        diff = (output_loop - output_vector).abs().max().item()
-        print(f"Max difference: {diff:.6f}")
-        assert diff < 1e-6, "Mismatch between loop and vectorized output!"
-
-        print("✅ Test passed! Vectorized version matches loop exactly.")
-
-
-    def cartesian_to_polar(self, x, y, H, W, R=None):
-        """
-        Map image coordinates (x, y) to polar feature map coordinates (q, p).
-        Args:
-            x: image x coordinate (can be tensor or scalar)
-            y: image y coordinate (can be tensor or scalar)
-            H: input image height
-            W: input image width
-            R: maximum radius (default: H * 0.7)
-        Returns:
-            q: radial index (float)
-            p: angular index (float)
-        """
+    def polar_rotation_grid(self, H, W, R=None, device="cpu"):
         if R is None:
-            R = H * 0.7
-        dx = torch.tensor(x - W / 2, dtype=torch.float32)
-        dy = torch.tensor(y - H / 2, dtype=torch.float32)
-        r = torch.sqrt(dx ** 2 + dy ** 2)
-        theta = torch.atan2(dy, dx) % (2 * math.pi)
-        q = r * H / R
-        p = theta * W / (2 * math.pi)
-        return q, p
-    
-    def polar_to_cartesian(self, q, p, H, W, R=None):
-        """
-        Map polar feature map coordinates (q, p) to image coordinates (x, y).
-        Args:
-            q: radial index (can be tensor or scalar)
-            p: angular index (can be tensor or scalar)
-            H: input image height
-            W: input image width
-            R: maximum radius (default: H * 0.7)
-        Returns:
-            x, y: image coordinates (float)
-        """
-        if R is None:
-            R = H * 0.7
+            if H > W:
+                R = H * W/H
+            else:
+                R = W * H/W
+        q = torch.arange(H, device=device).view(-1, 1)
+        p = torch.arange(W, device=device).view(1, -1)
         r = q * R / H
         theta = 2 * math.pi * p / W
         x = r * torch.cos(theta) + W / 2
         y = r * torch.sin(theta) + H / 2
-        return x, y
+        # Normalize to [-1, 1] for grid_sample
+        x_norm = 2 * (x / (W - 1)) - 1
+        y_norm = 2 * (y / (H - 1)) - 1
+        grid = torch.stack((x_norm, y_norm), dim=-1)  # (H, W, 2)
+        return grid
+    
+    def cartesian_to_polar_grid(self, H, W, R=None, device="cpu"):
+        if R is None:
+            if H > W:
+                R = H * W/H
+            else:
+                R = W * H/W
+        y = torch.arange(H, device=device).view(-1, 1).expand(H, W)
+        x = torch.arange(W, device=device).view(1, -1).expand(H, W)
+        x_c = x - W / 2
+        y_c = y - H / 2
+        r = torch.sqrt(x_c ** 2 + y_c ** 2)
+        theta = torch.atan2(y_c, x_c)
+        theta = (theta + 2 * math.pi) % (2 * math.pi)  # [0, 2pi]
+        q = r * H / R
+        p = theta * W / (2 * math.pi)
+        # Normalize to [-1, 1]
+        q_norm = 2 * (q / (H - 1)) - 1
+        p_norm = 2 * (p / (W - 1)) - 1
+        grid = torch.stack((p_norm, q_norm), dim=-1)  # (H, W, 2)
+        return grid
+    
+    # grid: (H_out, W_out, 2)
+    def get_nearest_indices(self, grid, H, W):
+        x = ((grid[..., 0] + 1) * (W - 1) / 2)
+        y = ((grid[..., 1] + 1) * (H - 1) / 2)
+        x_idx = torch.round(x).long().clamp(0, W - 1)
+        y_idx = torch.round(y).long().clamp(0, H - 1)
+        return x_idx, y_idx  # Each (H_out, W_out)
+    
+    def get_bilinear_indices_and_weights(self, grid, H, W):
+        # grid: (N, H_out, W_out, 2), values in [-1, 1]
+        # Convert normalized grid to image coordinates
+        x = ((grid[..., 0] + 1) * (W - 1) / 2)
+        y = ((grid[..., 1] + 1) * (H - 1) / 2)
+
+        x0 = torch.floor(x).long()
+        x1 = x0 + 1
+        y0 = torch.floor(y).long()
+        y1 = y0 + 1
+
+        # Clip to valid range
+        x0 = x0.clamp(0, W - 1)
+        x1 = x1.clamp(0, W - 1)
+        y0 = y0.clamp(0, H - 1)
+        y1 = y1.clamp(0, H - 1)
+
+        # Weights
+        wx = x - x0.float()
+        wy = y - y0.float()
+
+        w00 = (1 - wx) * (1 - wy)
+        w01 = wx * (1 - wy)
+        w10 = (1 - wx) * wy
+        w11 = wx * wy
+
+        # Each of these is (N, H_out, W_out)
+        return (x0, x1, y0, y1), (w00, w01, w10, w11)
+
+    def polar_rotation_transform(self, image):
+        # image: (N, C, H, W)
+        N, C, H, W = image.shape
+        grid = self.polar_rotation_grid(H, W, device=image.device)  # (H, W, 2)
+        indices, weights = self.get_bilinear_indices_and_weights(grid, H, W)
+        grid = grid.unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
+        output = F.grid_sample(image, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        return output, indices, weights, H, W
+    
+    def restore_cartesian_img(self, cyclic_img, indices, weights, height, width):
+        """
+        Args:
+            cyclic_img: (N, C, H_out, W_out)
+            indices: (x0, x1, y0, y1) each (H_out, W_out)
+            weights: (w00, w01, w10, w11) each (H_out, W_out)
+            height, width: target cartesian image size
+        Returns:
+            cartesian_img: (N, C, height, width)
+        """
+        N, C, H_out, W_out = cyclic_img.shape
+        cartesian_img = torch.zeros((N, C, height, width), dtype=cyclic_img.dtype, device=cyclic_img.device)
+        x0, x1, y0, y1 = indices
+        w00, w01, w10, w11 = weights
+
+        for n in range(N):
+            for c in range(C):
+                # Flatten all indices and weights
+                vals = cyclic_img[n, c].reshape(-1)  # (H_out*W_out,)
+                for dx, dy, w in [
+                    (x0, y0, w00), (x1, y0, w01), (x0, y1, w10), (x1, y1, w11)
+                ]:
+                    # dx, dy, w: (H_out, W_out)
+                    dx_flat = dx.reshape(-1)
+                    dy_flat = dy.reshape(-1)
+                    w_flat = w.reshape(-1)
+                    # Scatter-add: add weighted values to the corresponding cartesian pixels
+                    cartesian_img[n, c].index_put_(
+                        (dy_flat, dx_flat),
+                        vals * w_flat,
+                        accumulate=True
+                    )
+        return cartesian_img
+    
+    def restore_cartesian_img_grid_sample(self, polar_img, H, W, R=None):
+        device = polar_img.device
+        grid = self.cartesian_to_polar_grid(H, W, R, device=device)
+        grid = grid.unsqueeze(0).repeat(polar_img.shape[0], 1, 1, 1)  # (N, H, W, 2)
+        # Note: grid_sample expects (N, C, H, W) and grid (N, H, W, 2)
+        restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        return restored
 
     def __call__(self, image: torch.Tensor) -> torch.Tensor:
         """Make the class callable."""
@@ -164,9 +233,30 @@ class PolarRotationTransform():
 
 if __name__ == "__main__":
     
-    N, C, H, W = 1, 3, 32, 32
-    images = torch.rand((N, C, H, W))
-    print(images[0])
+    # N, C, H, W = 1, 3, 64, 64
+    # images = torch.rand((N, C, H, W))
+
+    # Read the image
+    image = cv2.imread('/home/docker/torch/code/accelerated_features/modules/test_data/sunflower_rect.png')
+
+    # Convert BGR image to RGB image
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Define a transform to convert
+    # the image to torch tensor
+    transform = transforms.Compose([
+        transforms.ToTensor()
+    ])
+
+    # Convert the image to Torch tensor
+    tensor = transform(image)
+
+    images = tensor.unsqueeze(0)
+
+    # print the converted image tensor
+    print(tensor.shape)
+
+    # print(images[0])
 
     # # Show one of the images
     # plt.imshow(images[0].permute(1, 2, 0).numpy())
@@ -179,51 +269,51 @@ if __name__ == "__main__":
     # polar_transform.test_polar_sample()
 
     # Apply the polar rotation transform
-    transformed_images = polar_transform(images)
+    # transformed_images = polar_transform(images)
 
-    # Apply the second version
-    transformed_image_new = polar_transform.transform(images)
+    # # Apply the second version
+    # transformed_image_new = polar_transform.transform(images)
 
-    print(transformed_image_new.shape)
+    transformed_image_second_new, restore_indices, restore_weights, original_height, original_width = polar_transform.polar_rotation_transform(images)
+    restored_img = polar_transform.restore_cartesian_img_grid_sample(transformed_image_second_new, original_height, original_width)
+    # print(transformed_image_second_new.shape)
+    # print(images.shape)
 
-    # Pick a point in the polar feature map
-    q, p = 10, 15  # radial and angular indices
+    # # Pick a point in the polar feature map
+    # q, p = 10, 15  # radial and angular indices
 
-    # Map to Cartesian coordinates
-    x, y = polar_transform.polar_to_cartesian(torch.tensor(q), torch.tensor(p), H, W)
-    x_idx = int(round(x.item()))
-    y_idx = int(round(y.item()))
+    # # Map to Cartesian coordinates
+    # x, y = polar_transform.polar_to_cartesian(torch.tensor(q), torch.tensor(p), H, W)
+    # x_idx = int(round(x.item()))
+    # y_idx = int(round(y.item()))
 
-    # Check bounds
-    if 0 <= x_idx < W and 0 <= y_idx < H:
-        orig_value = images[0, 2, y_idx, x_idx]
-        polar_value = transformed_image_new[0, 2, q, p]
-        print(f"Polar value: {polar_value}, Original value: {orig_value}")
-    else:
-        print("Mapped Cartesian coordinates are out of bounds.")
+    # # Check bounds
+    # if 0 <= x_idx < W and 0 <= y_idx < H:
+    #     orig_value = images[0, 2, y_idx, x_idx]
+    #     polar_value = transformed_image_new[0, 2, q, p]
+    #     print(f"Polar value: {polar_value}, Original value: {orig_value}")
+    # else:
+    #     print("Mapped Cartesian coordinates are out of bounds.")
 
-    # Reverse mapping check
-    q_new, p_new = polar_transform.cartesian_to_polar(x_idx, y_idx, H, W)
-    print(f"Reversed polar coordinates: q={q_new}, p={p_new}")
-    # Check if the polar coordinates are close to the original
-    print(f"Value at original coordinates: {images[0, 2, y_idx, x_idx]}")
-    print(f"Value at polar coordinates: {transformed_image_new[0, 2, int(q_new), int(p_new)]}")
-    print(q_new, p_new, q, p)
+    # Show the first transformed image of the batch using both methods
+    plt.subplot(1, 4, 1)
+    plt.imshow(images[0].permute(1, 2, 0).numpy())
+    plt.axis('off')
+    plt.title("Input")
+    plt.subplot(1, 4, 2)
+    plt.imshow(transformed_image_second_new[0].permute(1, 2, 0).numpy())
+    plt.axis('off')
+    plt.title("Polar")
+    plt.subplot(1, 4, 3)
+    # Calculate the difference image
+    diff_img = torch.abs(images[0] - restored_img[0])
+    diff = diff_img / diff_img.max()  # normalize for visualization
+    plt.imshow(diff_img.permute(1, 2, 0).numpy())
+    plt.axis('off')
+    plt.title("Difference")
+    plt.subplot(1, 4, 4)
+    plt.imshow(restored_img[0].permute(1, 2, 0).numpy())
+    plt.axis('off')
+    plt.title("Restored")
 
-    # Print the shape of the transformed images
-    print(transformed_images.shape)  # Expected output: (N, C, 192, W)
-    print(transformed_image_new.shape)  # Expected output: (N, C, H, W)
-
-    # print(transformed_images[0])
-    # print(transformed_image_new[0])
-
-    # # Show the first transformed image of the batch using both methods
-    # plt.subplot(1, 2, 1)
-    # plt.imshow(transformed_images[0].permute(1, 2, 0).numpy())
-    # plt.axis('off')
-    # plt.title("Polar Rotation Transform")
-    # plt.subplot(1, 2, 2)
-    # plt.imshow(transformed_image_new[0].permute(1, 2, 0).numpy())
-    # plt.axis('off')
-    # plt.title("Cartesian to Polar Transform")
-    # plt.show()
+    plt.show()

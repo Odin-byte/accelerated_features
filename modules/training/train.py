@@ -358,10 +358,10 @@ class Trainer():
                             d[k] = d[k].to(self.dev)
                 
                     p1, p2 = d['image0'], d['image1']
-                    positives_md_coarse = megadepth_warper.spvs_coarse(d)
+                    positives_md_coarse = megadepth_warper.spvs_coarse(d, 8)
 
                 if self.augmentor is not None:
-                    h_coarse, w_coarse = p1s[0].shape[-2] // 10.6666, p1s[0].shape[-1] // 4 # Hardcoded scaling factors adapted by adding the influence of the cyclic conv
+                    h_coarse, w_coarse = p1s[0].shape[-2] // 8, p1s[0].shape[-1] // 8
                     _ , positives_s_coarse = get_corresponding_pts(p1s, p2s, H1, H2, self.augmentor, h_coarse, w_coarse)
 
                 if self.plot_test:
@@ -393,6 +393,7 @@ class Trainer():
                 for p in positives_c:
                     if len(p) < 30:
                         is_corrupted = True
+                        print(f"Batch {i} is corrupted with too few correspondences: {len(p)}")
 
                 if is_corrupted:
                     continue
@@ -405,9 +406,8 @@ class Trainer():
 
                 for b in range(len(positives_c)):
                     #Get positive correspondencies
-                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:] # This points are already in feature map space and computed by the warper
-                    # Therefore we do not need to calcuate the polar indices
-                
+                    pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:]
+
                     #Grab features at corresponding idxs
                     m1 = feats1[b, :, pts1[:,1].long(), pts1[:,0].long()].permute(1,0)
                     m2 = feats2[b, :, pts2[:,1].long(), pts2[:,0].long()].permute(1,0)
@@ -441,6 +441,7 @@ class Trainer():
                 nb_coarse = len(m1)
                 loss = torch.cat(loss_items, -1).mean()
                 loss_coarse = loss_ds.item()
+                loss_coord = loss_coords.item()
                 loss_coord = loss_coords.item()
                 loss_kp_pos = loss_kp_pos.item()
                 loss_l1 = loss_kp.item()

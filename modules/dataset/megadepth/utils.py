@@ -8,6 +8,7 @@
 
 import io
 import cv2
+import math
 import numpy as np
 import h5py
 import torch
@@ -158,3 +159,64 @@ def read_megadepth_depth(path, pad_to=None):
         depth, _ = pad_bottom_right(depth, pad_to, ret_mask=False)
     depth = torch.from_numpy(depth).float()  # (h, w)
     return depth
+
+# --- Cyclic Polar Convolution ---
+
+def cartesian_to_polar_grid(H, W, R=None, device="cpu"):
+    if R is None:
+        R = min(H, W)
+    y = torch.arange(H, device=device).view(-1, 1).expand(H, W)
+    x = torch.arange(W, device=device).view(1, -1).expand(H, W)
+    x_c = x - W / 2
+    y_c = y - H / 2
+    r = torch.sqrt(x_c ** 2 + y_c ** 2)
+    theta = torch.atan2(y_c, x_c)
+    theta = (theta + 2 * math.pi) % (2 * math.pi)  # [0, 2pi]
+    q = r * H / R
+    p = theta * W / (2 * math.pi)
+    # Normalize to [-1, 1]
+    q_norm = 2 * (q / (H - 1)) - 1
+    p_norm = 2 * (p / (W - 1)) - 1
+    grid = torch.stack((p_norm, q_norm), dim=-1)  # (H, W, 2)
+    return grid
+
+def restore_cartesian_img_grid_sample(polar_img, H, W, R=None):
+    device = polar_img.device
+    grid = cartesian_to_polar_grid(H, W, R, device=device)
+    grid = grid.unsqueeze(0).repeat(polar_img.shape[0], 1, 1, 1)  # (N, H, W, 2)
+    # Note: grid_sample expects (N, C, H, W) and grid (N, H, W, 2)
+    restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='border', align_corners=True)
+    return restored
+
+def cartesian_to_polar_indices(x, y, H, W, R=None):
+    if R is None:
+        R = min(H, W)
+    cx = W / 2
+    cy = H / 2
+
+    x_c = x - cx
+    y_c = y - cy
+
+    r = math.sqrt(x_c**2 + y_c**2)
+    theta = math.atan2(y_c, x_c)
+    if theta < 0:
+        theta += 2 * math.pi
+
+    q = r * H / R
+    p = theta * W / (2 * math.pi)
+
+    return q, p
+
+def polar_indices_to_cartesian(p, q, H, W, R=None):
+    if R is None:
+        R = min(H, W)
+    cx = W / 2
+    cy = H / 2
+
+    r = q * R / H
+    theta = p * 2 * math.pi / W
+
+    x = r * math.cos(theta) + cx
+    y = r * math.sin(theta) + cy
+
+    return x, y

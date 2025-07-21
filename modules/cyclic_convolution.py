@@ -4,16 +4,14 @@ import torch.nn.functional as F
 
 
 class CyclicConvolution(nn.Module):
-    def __init__(self, stride=1, padding=0):
+    def __init__(self, stride=1):
         """Initialize the CyclicConvolution layer.
 
         Args:
             stride (int): Stride for the convolution operation.
-            padding (int): Padding for the convolution operation.
         """
         super(CyclicConvolution, self).__init__()
         self.stride = stride
-        self.padding = padding
 
     def set_stride(self, stride: int):
         """Set the stride for the convolution operation.
@@ -26,17 +24,6 @@ class CyclicConvolution(nn.Module):
             raise ValueError("Stride must be a positive integer.")
         self.stride = stride
 
-    def set_padding(self, padding: int):
-        """Set the padding for the convolution operation.
-        Zero padding is used if given a positive integer.
-
-        Args:
-            padding (int): Length of padding added to each dimension.
-        """
-        if not isinstance(padding, int) or padding < 0:
-            raise ValueError("Padding must be a positive integer.")
-        self.padding = padding
-
     def forward(self, image: torch.Tensor, kernel: torch.nn.Parameter) -> torch.Tensor:
         """Perform the cyclic convolution operation.
 
@@ -47,28 +34,39 @@ class CyclicConvolution(nn.Module):
         Returns:
             torch.Tensor: Output tensor after cyclic convolution.
         """
-        # Ensure the input and kernel are on the same device
         device = image.device
         kernel = kernel.to(device)
 
-        # Concat the input along the width dimension / side by side
-        input_concat = torch.cat((image, image), 3)
-        # Run the cyclic convolution
-        output = F.conv2d(
-            input_concat, kernel, padding=self.padding, stride=self.stride
-        )
+        kernel_height, kernel_width = kernel.size(2), kernel.size(3)
+        pad_w = kernel_width // 2
+        pad_h = kernel_height // 2
+
+        # 1. Apply circular padding along width (left-right)
+        image = F.pad(image, (pad_w, pad_w, 0, 0), mode='circular')  # pads last dim (W)
+
+        # 2. Apply zero padding along height (top-bottom)
+        image = F.pad(image, (0, 0, pad_h, pad_h), mode='constant', value=0)  # pads height
+
+        # Now convolve
+        output = F.conv2d(image, kernel, stride=self.stride, padding=0)
         return output
 
 
 if __name__ == "__main__":
-    # Generate a toy example using an input of 3x3 with the values 1,2,3,4,5,6,7,8,9
     # Create a 3x3 input tensor
-    batch_size, channels, height, width = 1, 3, 24, 32
-    input_tensor = torch.rand((batch_size, channels, height, width))
+    batch_size, channels, height, width = 1, 3, 377, 608
+    # Generate a toy example using an input of 3x3 with the values 1,2,3,4,5,6,7,8,9
+    input_tensor = torch.tensor([[1, 2, 3],
+                                   [4, 5, 6],
+                                   [7, 8, 9]], dtype=torch.float32)
+    # Make the tensor 4D by adding batch and channel dimensions
+    input_tensor = input_tensor.unsqueeze(0).unsqueeze(0).repeat(batch_size, channels, 1, 1)
 
     test_layer = CyclicConvolution()
     kernel = nn.Parameter(torch.randn(1, 3, 3, 3, requires_grad=True))
 
-    test_layer.set_padding(1)
     test_output = test_layer(input_tensor, kernel)
+
+    print(input_tensor)
+    print(test_output)
     print(test_output.size())

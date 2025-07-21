@@ -49,103 +49,6 @@ def plot_corrs(p1, p2, src_pts, tgt_pts):
     ax[1].imshow(img2.permute(1,2,0).numpy()[...,::-1])
     plt.show()
 
-def map_img_coords_to_cyclic_polar_feature_coords(
-    pts, H, W, R=None, kernel_size=1, stride=1, padding=0
-):
-    """
-    Map image coordinates ([N, 2] or [B, N, 2]) to feature map coordinates ([N, 2] or [B, N, 2])
-    after polar transform and cyclic conv. Supports optional batch dimension.
-    Args:
-        pts: tensor of shape [N, 2] or [B, N, 2] (image coordinates)
-    Returns:
-        cyclic_coords: tensor of shape [N, 2] or [B, N, 2] (feature map coordinates)
-    """
-    orig_shape = pts.shape
-    has_batch = (pts.dim() == 3)
-    if has_batch:
-        B, N, _ = pts.shape
-        x = pts[..., 0]
-        y = pts[..., 1]
-    else:
-        N, _ = pts.shape
-        x = pts[:, 0]
-        y = pts[:, 1]
-    if R is None:
-        R = H * 0.7
-    dx = x - W / 2
-    dy = y - H / 2
-    r = torch.sqrt(dx ** 2 + dy ** 2)
-    theta = torch.atan2(dy, dx) % (2 * np.pi)
-    q = r * H / R
-    p = theta * W / (2 * np.pi)
-
-    if isinstance(kernel_size, int): k = kernel_size
-    else: k = kernel_size[0]
-    if isinstance(stride, int): s = stride
-    else: s = stride[0]
-    if isinstance(padding, int): pad = padding
-    else: pad = padding[0]
-
-    q_feat = ((q + pad - k // 2) // s)
-    p_feat = ((p + pad - k // 2) // s)
-    p_feat = p_feat % W  # Cyclic wrap for p_feat (width)
-
-    if has_batch:
-        cyclic_coords = torch.stack([q_feat, p_feat], dim=-1)  # [B, N, 2]
-    else:
-        cyclic_coords = torch.stack([q_feat, p_feat], dim=-1)  # [N, 2]
-    return cyclic_coords
-
-def map_cyclic_polar_feature_coords_to_img_coords(
-    cyclic_coords, H, W, R=None, kernel_size=1, stride=1, padding=0
-):
-    """
-    Map feature map coordinates (..., N, 2) after cyclic conv and polar transform back to image coordinates (..., N, 2).
-    Supports optional batch dimension.
-    Args:
-        cyclic_coords: tensor of shape [N, 2] or [B, N, 2] (feature map coordinates)
-    Returns:
-        img_coords: tensor of shape [N, 2] or [B, N, 2] (image coordinates)
-    """
-    orig_shape = cyclic_coords.shape
-    has_batch = (cyclic_coords.dim() == 3)
-    if has_batch:
-        B, N, _ = cyclic_coords.shape
-        q_feat = cyclic_coords[..., 0]
-        p_feat = cyclic_coords[..., 1]
-    else:
-        N, _ = cyclic_coords.shape
-        q_feat = cyclic_coords[:, 0]
-        p_feat = cyclic_coords[:, 1]
-
-    if isinstance(kernel_size, int): k = kernel_size
-    else: k = kernel_size[0]
-    if isinstance(stride, int): s = stride
-    else: s = stride[0]
-    if isinstance(padding, int): pad = padding
-    else: pad = padding[0]
-
-    q = q_feat * s - pad + k // 2
-    p = p_feat * s - pad + k // 2
-    p = p % W  # Cyclic wrap for p (width)
-
-    if R is None:
-        R = H * 0.7
-    r = q * R / H
-    theta = 2 * np.pi * p / W
-    x = r * torch.cos(theta) + W / 2
-    y = r * torch.sin(theta) + H / 2
-
-    # Clamp to image bounds due to rounding errors
-    x = torch.clamp(x, 0, W - 1)
-    y = torch.clamp(y, 0, H - 1)
-
-    if has_batch:
-        img_coords = torch.stack([x, y], dim=-1)  # [B, N, 2]
-    else:
-        img_coords = torch.stack([x, y], dim=-1)  # [N, 2]
-    return img_coords
-
 
 def get_corresponding_pts(p1, p2, H, H2, augmentor, h, w, crop = None):
     '''
@@ -153,9 +56,6 @@ def get_corresponding_pts(p1, p2, H, H2, augmentor, h, w, crop = None):
     '''
     global debug_cnt
     negatives, positives = [], []
-
-    w = int(w)
-    h = int(h)
 
     with torch.no_grad():
         #real input res of samples
@@ -168,12 +68,7 @@ def get_corresponding_pts(p1, p2, H, H2, augmentor, h, w, crop = None):
         #Generate meshgrid of target pts
         x, y = torch.meshgrid(torch.arange(w, device=p1.device), torch.arange(h, device=p1.device), indexing ='xy')
         mesh = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)
-        target_pts = mesh.view(-1, 2) * torch.tensor([8, 8], device = p1.device) # Hardcoded scaling factor for the linear scaling within the classic conv layers
-
-        # Get the corresponding points in the image space
-        target_pts = map_cyclic_polar_feature_coords_to_img_coords(
-            target_pts, rh, rw, kernel_size=3, stride=1, padding=1
-        )
+        target_pts = mesh.view(-1, 2) * ratio
 
         #Pack all transformations into T
         for batch_idx in range(len(p1)):
@@ -209,18 +104,8 @@ def get_corresponding_pts(p1, p2, H, H2, augmentor, h, w, crop = None):
                     plot_corrs(p1[batch_idx], p2[batch_idx], src_pts , tgt_pts )
                     debug_cnt +=1
 
-                # Convert image space coordinates to cyclic polar feature map coordinates
-                src_pts_cyclic = map_img_coords_to_cyclic_polar_feature_coords(
-                    src_pts, rh, rw, kernel_size=3, stride=1, padding=1
-                )
-                tgt_pts_cyclic = map_img_coords_to_cyclic_polar_feature_coords(
-                    tgt_pts, rh, rw, kernel_size=3, stride=1, padding=1
-                )
-                # The liniear scaling is hardcoded as the polar transform needs to be accounted for separately as it is not a linear transform
-                # TODO: Calculate the remaining scaling factor 
-                # Convert back to image space coordinates
-                src_pts = (src_pts_cyclic / 8)
-                tgt_pts = (tgt_pts_cyclic / 8)
+                src_pts = (src_pts / ratio)
+                tgt_pts = (tgt_pts / ratio)
 
                 #Check out of bounds points
                 padto = 10 if crop is not None else 2
@@ -233,7 +118,7 @@ def get_corresponding_pts(p1, p2, H, H2, augmentor, h, w, crop = None):
                 src_pts = src_pts[mask_valid]         
 
                 #Remove repeated correspondences
-                lut_mat = torch.ones((int(h), int(w), 4), device = src_pts.device, dtype = src_pts.dtype) * -1
+                lut_mat = torch.ones((h, w, 4), device = src_pts.device, dtype = src_pts.dtype) * -1
                 # src_pts_np = src_pts.cpu().numpy()
                 # tgt_pts_np = tgt_pts.cpu().numpy()
                 try:

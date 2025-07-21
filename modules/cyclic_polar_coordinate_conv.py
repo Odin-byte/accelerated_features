@@ -1,13 +1,15 @@
 import torch
+import cv2
 import torch.nn as nn
 from modules.polar_rotation import PolarRotationTransform
 from modules.cyclic_convolution import CyclicConvolution
+import torchvision.transforms as transforms
 
 # filepath: /home/dominik/PHD/code/xfeat/code/accelerated_features/modules/cyclic_polar_coordinate_conv.py
 
 
 class CyclicPolarCoordinateConvLayer(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1):
         """
         Custom PyTorch layer that applies a polar rotation transform followed by a cyclic convolution.
 
@@ -22,7 +24,6 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.stride = stride
-        self.padding = padding
 
         # Define a learnable kernel for cyclic convolution
         self.kernel = nn.Parameter(
@@ -30,7 +31,6 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
         )
 
         self.cyclic_conv.set_stride(self.stride)
-        self.cyclic_conv.set_padding(self.padding)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -54,15 +54,58 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
         return cyclic_conv
 
 if __name__ == "__main__":
-    # Example usage
-    batch_size, channels, height, width = 1, 3, 32, 32
-    input_tensor = torch.rand((batch_size, channels, height, width))
+    # Load in a sample    # Read the image
+    image = cv2.imread('/home/docker/torch/code/accelerated_features/modules/test_data/four.png')
+
+    # Convert BGR image to RGB image
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Define a transform to convert
+    # the image to torch tensor
+    transform = transforms.Compose([
+        transforms.ToTensor()
+    ])
+
+    # Rotate the image by 90 degrees
+    image_rot = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+
+    # Fill the image with zeros
+    image_rot = cv2.resize(image_rot, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    # Convert the image to Torch tensor
+    tensor = transform(image)
+    images = tensor.unsqueeze(0)
+
+    tensor_rotated = transform(image_rot
+                               ).unsqueeze(0)
 
     # Create an instance of the custom layer
-    cyclic_polar_layer = CyclicPolarCoordinateConvLayer(kernel_size=3, stride=1, padding=1)
+    cyclic_polar_layer = CyclicPolarCoordinateConvLayer(in_channels=3, out_channels=3, kernel_size=3, stride=1)
 
     # Forward pass
-    output_tensor = cyclic_polar_layer(input_tensor)
+    output_tensor = cyclic_polar_layer(images)
+
+    output_tensor_rotated = cyclic_polar_layer(tensor_rotated)
+    
+    # Print the shape of the output tensor
+    print("Output Tensor Shape:", output_tensor.shape)
+    print("Output Tensor Rotated Shape:", output_tensor_rotated.shape)
+
+    # Show the output tensor
+    output_image = output_tensor.squeeze(0).permute(1, 2, 0).detach().numpy()
+    output_image_rotated = output_tensor_rotated.squeeze(0).permute(1, 2, 0).detach().numpy()
+
+    # Convert the output tensor to an image format
+    output_image = (output_image * 255).astype('uint8')
+    output_image_rotated = (output_image_rotated * 255).astype('uint8')
+
+    # Display the output images
+    cv2.imshow('Cyclic Polar Coordinate Convolution Output', output_image)
+    cv2.imshow('Cyclic Polar Coordinate Convolution Output Rotated', output_image_rotated)
+
+    # Wait for a key press and close the image windows
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
     # Print the shape of the output tensor
     print("Output Tensor Shape:", output_tensor.shape)

@@ -167,6 +167,35 @@ class PolarRotationTransform():
         """Make the class callable."""
         return self.polar_rotation_transform(image)
     
+def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=None):
+        """
+        Args:
+            xy_grid: Tensor of shape (N, H, W, 2) or (H, W, 2) with coordinates in (x, y) format.
+            H: Height of image
+            W: Width of image
+            R: Optional max radius; defaults to min(H, W)
+
+        Returns:
+            polar_indices: Tensor of shape (..., 2) with (p, q) indices
+        """
+        if R is None:
+            R = min(H, W)
+
+        # Center coordinates
+        cx = W / 2.0
+        cy = H / 2.0
+
+        x = xy_grid[..., 0] - cx  # shape (...,)
+        y = xy_grid[..., 1] - cy
+
+        r = torch.sqrt(x ** 2 + y ** 2)
+        theta = torch.atan2(y, x)
+        theta = torch.remainder(theta, 2 * math.pi)  # Ensures [0, 2pi)
+
+        q = r * H / R
+        p = theta * W / (2 * math.pi)
+
+        return torch.stack((p, q), dim=-1)
     # Example usage
 
 if __name__ == "__main__":
@@ -209,13 +238,16 @@ if __name__ == "__main__":
 
     restored_img = polar_transform.restore_cartesian_img_grid_sample(transformed_image_second_new, original_height, original_width)
 
+
     # Check if the pixel which is at cx-10, cy-10 in the original image has the same value in the polar image
     cx, cy = original_width // 2, original_height // 2
     x, y = float(cx - 325), float(cy)
+
+    x_y_grid = torch.tensor([x, y])
     
     # Get polar indices
-    q, p = polar_transform.cartesian_to_polar_indices(x, y, original_height, original_width)
     
+    q, p = cartesian_to_polar_indices_tensor(x_y_grid, original_height, original_width)    
 
     # Show the first transformed image of the batch using both methods
     plt.subplot(1, 2, 1)

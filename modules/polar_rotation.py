@@ -57,118 +57,46 @@ class PolarRotationTransform():
         self.output_image = F.interpolate(self.output_image, size=(new_height, W), mode='nearest')
         
         return self.output_image
-    
-    # def polar_transform_vectorized(self, image):
-    #     N, C, H, W = image.shape
-    #     R = H * 0.7
-
-    #     q = torch.arange(H, device=image.device).view(H, 1)
-    #     p = torch.arange(W, device=image.device).view(1, W)
-
-    #     r = q * R / H
-    #     theta = 2 * math.pi * p / W
-
-    #     x = (r * torch.cos(theta)).round().long() + W // 2
-    #     y = (r * torch.sin(theta)).round().long() + H // 2
-
-    #     in_bounds = (x >= 0) & (x < W) & (y >= 0) & (y < H)
-
-    #     x_clamped = x.clamp(0, W - 1)
-    #     y_clamped = y.clamp(0, H - 1)
-
-    #     # Flatten indices for advanced indexing
-    #     x_flat = x_clamped.view(-1)  # (H*W,)
-    #     y_flat = y_clamped.view(-1)  # (H*W,)
-    #     in_bounds_flat = in_bounds.view(-1)  # (H*W,)
-
-    #     output = torch.full((N, C, H, W), 255, dtype=image.dtype, device=image.device)
-
-    #     for n in range(N):
-    #         # Gather pixels for batch n using flattened indices
-    #         pixels = image[n, :, y_flat, x_flat]  # [C, H*W]
-
-    #         # Set out-of-bounds pixels to 255 manually
-    #         pixels[:, ~in_bounds_flat] = 255
-
-    #         # Reshape back to [C, H, W]
-    #         output[n] = pixels.view(C, H, W)
-
-    #     new_height = int(3 * H / 4)
-    #     output = F.interpolate(output, size=(new_height, W), mode='nearest')
-
-    #     return output
-    
 
     def polar_rotation_grid(self, H, W, R=None, device="cpu"):
         if R is None:
-            R = min(H, W)
+            R = max(H, W)
         q = torch.arange(H, device=device).view(-1, 1)
         p = torch.arange(W, device=device).view(1, -1)
-        r = q * R / H
+        r = q * R / max(H, W)
         theta = 2 * math.pi * p / W
-        x = r * torch.cos(theta) + W / 2
-        y = r * torch.sin(theta) + H / 2
-        # Normalize to [-1, 1] for grid_sample
+        x = r * torch.cos(theta) + (W - 1) / 2
+        y = r * torch.sin(theta) + (H - 1) / 2
         x_norm = 2 * (x / (W - 1)) - 1
         y_norm = 2 * (y / (H - 1)) - 1
-        grid = torch.stack((x_norm, y_norm), dim=-1)  # (H, W, 2)
+        grid = torch.stack((x_norm, y_norm), dim=-1)
         return grid
     
     def cartesian_to_polar_grid(self, H, W, R=None, device="cpu"):
         if R is None:
-            R = min(H, W)
+            R = max(H, W)
         y = torch.arange(H, device=device).view(-1, 1).expand(H, W)
         x = torch.arange(W, device=device).view(1, -1).expand(H, W)
-        x_c = x - W / 2
-        y_c = y - H / 2
+
+        cx = (W - 1) / 2
+        cy = (H - 1) / 2
+
+        x_c = x - cx
+        y_c = y - cy
+
         r = torch.sqrt(x_c ** 2 + y_c ** 2)
         theta = torch.atan2(y_c, x_c)
-        theta = (theta + 2 * math.pi) % (2 * math.pi)  # [0, 2pi]
-        q = r * H / R
+        theta = (theta + 2 * math.pi) % (2 * math.pi)
+
+        q = r * max(H, W) / R
         p = theta * W / (2 * math.pi)
+
         # Normalize to [-1, 1]
         q_norm = 2 * (q / (H - 1)) - 1
         p_norm = 2 * (p / (W - 1)) - 1
+
         grid = torch.stack((p_norm, q_norm), dim=-1)  # (H, W, 2)
         return grid
-    
-    # # grid: (H_out, W_out, 2)
-    # def get_nearest_indices(self, grid, H, W):
-    #     x = ((grid[..., 0] + 1) * (W - 1) / 2)
-    #     y = ((grid[..., 1] + 1) * (H - 1) / 2)
-    #     x_idx = torch.round(x).long().clamp(0, W - 1)
-    #     y_idx = torch.round(y).long().clamp(0, H - 1)
-    #     return x_idx, y_idx  # Each (H_out, W_out)
-    
-    # def get_bilinear_indices_and_weights(self, grid, H, W):
-    #     # grid: (N, H_out, W_out, 2), values in [-1, 1]
-    #     # Convert normalized grid to image coordinates
-    #     x = ((grid[..., 0] + 1) * (W - 1) / 2)
-    #     y = ((grid[..., 1] + 1) * (H - 1) / 2)
-
-    #     x0 = torch.floor(x).long()
-    #     x1 = x0 + 1
-    #     y0 = torch.floor(y).long()
-    #     y1 = y0 + 1
-
-    #     # Clip to valid range
-    #     x0 = x0.clamp(0, W - 1)
-    #     x1 = x1.clamp(0, W - 1)
-    #     y0 = y0.clamp(0, H - 1)
-    #     y1 = y1.clamp(0, H - 1)
-
-    #     # Weights
-    #     wx = x - x0.float()
-    #     wy = y - y0.float()
-
-    #     w00 = (1 - wx) * (1 - wy)
-    #     w01 = wx * (1 - wy)
-    #     w10 = (1 - wx) * wy
-    #     w11 = wx * wy
-
-    #     # Each of these is (N, H_out, W_out)
-    #     return (x0, x1, y0, y1), (w00, w01, w10, w11)
-
     def polar_rotation_transform(self, image):
         # image: (N, C, H, W)
         N, C, H, W = image.shape
@@ -176,40 +104,6 @@ class PolarRotationTransform():
         grid = grid.unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
         output = F.grid_sample(image, grid, mode='bilinear', padding_mode='border', align_corners=True)
         return output
-    
-    # def restore_cartesian_img(self, cyclic_img, indices, weights, height, width):
-    #     """
-    #     Args:
-    #         cyclic_img: (N, C, H_out, W_out)
-    #         indices: (x0, x1, y0, y1) each (H_out, W_out)
-    #         weights: (w00, w01, w10, w11) each (H_out, W_out)
-    #         height, width: target cartesian image size
-    #     Returns:
-    #         cartesian_img: (N, C, height, width)
-    #     """
-    #     N, C, H_out, W_out = cyclic_img.shape
-    #     cartesian_img = torch.zeros((N, C, height, width), dtype=cyclic_img.dtype, device=cyclic_img.device)
-    #     x0, x1, y0, y1 = indices
-    #     w00, w01, w10, w11 = weights
-
-    #     for n in range(N):
-    #         for c in range(C):
-    #             # Flatten all indices and weights
-    #             vals = cyclic_img[n, c].reshape(-1)  # (H_out*W_out,)
-    #             for dx, dy, w in [
-    #                 (x0, y0, w00), (x1, y0, w01), (x0, y1, w10), (x1, y1, w11)
-    #             ]:
-    #                 # dx, dy, w: (H_out, W_out)
-    #                 dx_flat = dx.reshape(-1)
-    #                 dy_flat = dy.reshape(-1)
-    #                 w_flat = w.reshape(-1)
-    #                 # Scatter-add: add weighted values to the corresponding cartesian pixels
-    #                 cartesian_img[n, c].index_put_(
-    #                     (dy_flat, dx_flat),
-    #                     vals * w_flat,
-    #                     accumulate=True
-    #                 )
-    #     return cartesian_img
     
     def restore_cartesian_img_grid_sample(self, polar_img, H, W, R=None):
         device = polar_img.device
@@ -220,35 +114,51 @@ class PolarRotationTransform():
         return restored
     
     def cartesian_to_polar_indices(self, x, y, H, W, R=None):
-        if R is None:
-            R = min(H, W)
-        cx = W / 2
-        cy = H / 2
+        """
+        Accepts scalars or tensors for x, y.
+        Returns q, p (can be tensors or scalars depending on input).
+        """
+        x = torch.as_tensor(x)
+        y = torch.as_tensor(y)
+        
+        device = x.device
+        dtype = x.dtype
 
+        if R is None:
+            R = (max(H,W)-1)
+
+        cx = (W - 1) / 2
+        cy = (H - 1) / 2
         x_c = x - cx
         y_c = y - cy
+        r = torch.sqrt(x_c**2 + y_c**2)
+        theta = torch.atan2(y_c, x_c)
+        theta = (theta + 2 * torch.pi) % (2 * torch.pi)
+        q = r * max(H, W) / R
+        p = theta * W / (2 * torch.pi)
+        return p, q
 
-        r = math.sqrt(x_c**2 + y_c**2)
-        theta = math.atan2(y_c, x_c)
-        if theta < 0:
-            theta += 2 * math.pi
-
-        q = r * H / R
-        p = theta * W / (2 * math.pi)
-
-        return q, p
-    
     def polar_indices_to_cartesian(self, p, q, H, W, R=None):
+        """
+        Accepts scalars or tensors for p, q.
+        Returns x, y (same shape and type as inputs).
+        """
+        p = torch.as_tensor(p)
+        q = torch.as_tensor(q)
+
+        device = p.device
+        dtype = p.dtype
+
         if R is None:
-            R = min(H, W)
-        cx = W / 2
-        cy = H / 2
+            R = (max(H, W)-1)
+        cx = (W - 1) / 2
+        cy = (H - 1) / 2
 
-        r = q * R / H
-        theta = p * 2 * math.pi / W
+        r = q * R / max(H, W)
+        theta = p * 2 * torch.pi / W
 
-        x = r * math.cos(theta) + cx
-        y = r * math.sin(theta) + cy
+        x = r * torch.cos(theta) + cx
+        y = r * torch.sin(theta) + cy
 
         return x, y
 
@@ -284,44 +194,10 @@ if __name__ == "__main__":
     # Convert the image to Torch tensor
     tensor = transform(image)
 
-    tensor_moved = transform(image_moved)
-
     images = tensor.unsqueeze(0)
-    images_moved = tensor_moved.unsqueeze(0)
-
-    # Show the point which is at cx-10, cy-10 in the original image
-    cx, cy = images.shape[3] // 2, images.shape[2] // 2
-    x, y = cx - 10, cy - 10
-
-    # # Draw a red circle at the point (cx-10, cy-10) in the original image
-    # cv2.circle(image, (x, y), radius=5, color=(255, 0, 0), thickness=-1)
-    # cv2.circle(image_moved, (x + 200, y + 100), radius=5, color=(255, 0, 0), thickness=-1)
-
-    # # Show the images with the point marked
-    # plt.figure(figsize=(10, 5))
-    
-    # # Show the original image with the point marked
-    # plt.subplot(1, 2, 1)
-    # plt.imshow(image)
-    # plt.axis('off')
-    # plt.title("Original Image with Point")
-
-    # # Show the moved image with the point marked
-    # plt.subplot(1, 2, 2)
-    # plt.imshow(image_moved)
-    # plt.axis('off')
-    # plt.title("Moved Image with Point")
-    
-    # plt.show()
 
     # Create an instance of the PolarRotationTransform class
     polar_transform = PolarRotationTransform()
-
-    # Apply the polar rotation transform
-    # transformed_images = polar_transform(images)
-
-    # # Apply the second version
-    # transformed_image_new = polar_transform.transform(images)
 
     original_height, original_width = images.shape[2], images.shape[3]
 
@@ -333,56 +209,40 @@ if __name__ == "__main__":
 
     restored_img = polar_transform.restore_cartesian_img_grid_sample(transformed_image_second_new, original_height, original_width)
 
-    transformed_image_second_new_moved, _, _ = polar_transform.polar_rotation_transform(images_moved)
-
-
     # Check if the pixel which is at cx-10, cy-10 in the original image has the same value in the polar image
     cx, cy = original_width // 2, original_height // 2
-    x, y = cx - 10, cy - 10
+    x, y = float(cx - 325), float(cy)
     
     # Get polar indices
     q, p = polar_transform.cartesian_to_polar_indices(x, y, original_height, original_width)
-    q = int(round(q))
-    p = int(round(p))
-    # Check bounds
-    if 0 <= q < transformed_image_second_new.shape[2] and 0 <= p < transformed_image_second_new.shape[3]:
-        polar_value_before_moved = transformed_image_second_new[0, :, q, p]
-    else:
-        print("Mapped polar coordinates are out of bounds.")
-
-    # Get the corresponding pixel in the moved image
-    x_moved, y_moved = x + 100, y + 100
-    # Get polar indices for the moved image
-    q_moved, p_moved = polar_transform.cartesian_to_polar_indices(x_moved, y_moved, original_height, original_width)
-    q_moved = int(round(q_moved))
-    p_moved = int(round(p_moved))
     
-    # Check bounds for the moved image
-    if 0 <= q_moved < transformed_image_second_new.shape[2] and 0 <= p_moved < transformed_image_second_new.shape[3]:
-        polar_value_after_moved = transformed_image_second_new_moved[0, :, q_moved, p_moved]
-    else:
-        print("Mapped polar coordinates for moved image are out of bounds.")
 
-    print(f"Polar value before moving: {polar_value_before_moved}")
-    print(f"Polar value after moving: {polar_value_after_moved}")
+    # Show the first transformed image of the batch using both methods
+    plt.subplot(1, 2, 1)
+    cart_img_np = images[0].permute(1, 2, 0).numpy()
+    plt.imshow(cart_img_np)
+    plt.scatter(x, y, c="green")
+    plt.axis('off')
+    plt.title("Input")
+    plt.subplot(1, 2, 2)
+    polar_img_np = transformed_image_second_new[0].permute(1, 2, 0).numpy()
+    plt.imshow(polar_img_np)
+    plt.scatter(q, p, c="green")
+    plt.axis('off')
+    plt.title("Polar")
 
-    # Calculate the euclidean distance between the two polar values
-    distance = torch.norm(polar_value_before_moved - polar_value_after_moved)
-    print(f"Euclidean distance between polar values: {distance.item()}")
+    plt.show()
 
-    # Check if coordinate transform is reversible
-    x = 10
-    y = 10
-    q, p = polar_transform.cartesian_to_polar_indices(x, y, original_height
-, original_width)
-    x_restored, y_restored = polar_transform.polar_indices_to_cartesian(p, q, original_height, original_width)
+    p, q = polar_transform.cartesian_to_polar_indices(x, y, original_height, original_width)
+    x2, y2 = polar_transform.polar_indices_to_cartesian(p, q, original_height, original_width)
 
-    print(f"Original coordinates: ({x}, {y})")
-    print(f"Polar indices: (q={round(q)}, p={round(p)})")
-    print(f"Restored coordinates: ({round(x_restored)}, {round(y_restored)})")
+    print(f"Original: ({x}, {y}) → Polar: ({p}, {q}) → Back: ({x2}, {y2})")
 
+    pixel_cart = cart_img_np[int(x), int(y)]
+    pixel_polar = polar_img_np[int(p), int(q)]
 
-    
+    print(f"Diff: {pixel_cart-pixel_polar}")
+
 
     # Show the first transformed image of the batch using both methods
     plt.subplot(1, 4, 1)
@@ -406,3 +266,5 @@ if __name__ == "__main__":
     plt.title("Restored")
 
     plt.show()
+
+

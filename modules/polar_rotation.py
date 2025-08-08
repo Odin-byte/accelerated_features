@@ -102,7 +102,7 @@ class PolarRotationTransform():
         N, C, H, W = image.shape
         grid = self.polar_rotation_grid(H, W, device=image.device)  # (H, W, 2)
         grid = grid.unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
-        output = F.grid_sample(image, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        output = F.grid_sample(image, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
         return output
     
     def restore_cartesian_img_grid_sample(self, polar_img, H, W, R=None):
@@ -110,7 +110,7 @@ class PolarRotationTransform():
         grid = self.cartesian_to_polar_grid(H, W, R, device=device)
         grid = grid.unsqueeze(0).repeat(polar_img.shape[0], 1, 1, 1)  # (N, H, W, 2)
         # Note: grid_sample expects (N, C, H, W) and grid (N, H, W, 2)
-        restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='border', align_corners=True)
+        restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
         return restored
     
     def cartesian_to_polar_indices(self, x, y, H, W, R=None):
@@ -173,7 +173,7 @@ def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=N
             xy_grid: Tensor of shape (N, H, W, 2) or (H, W, 2) with coordinates in (x, y) format.
             H: Height of image
             W: Width of image
-            R: Optional max radius; defaults to min(H, W)
+            R: Optional max radius; defaults to max(H, W)
 
         Returns:
             polar_indices: Tensor of shape (..., 2) with (p, q) indices
@@ -210,9 +210,7 @@ if __name__ == "__main__":
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     # Move the image 100 Pixels to the right and 100 Pixels down
-    image_moved = cv2.warpAffine(image,
-                                  M=np.float32([[1, 0, 100], [0, 1, 100]]),
-                                  dsize=(image.shape[1], image.shape[0]))
+    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
 
     # Define a transform to convert
     # the image to torch tensor
@@ -225,12 +223,29 @@ if __name__ == "__main__":
 
     images = tensor.unsqueeze(0)
 
+    rotated = transform(rotated).unsqueeze(0)
+
     # Create an instance of the PolarRotationTransform class
     polar_transform = PolarRotationTransform()
 
     original_height, original_width = images.shape[2], images.shape[3]
 
     transformed_image_second_new = polar_transform.polar_rotation_transform(images)
+
+    transformed_rotated = polar_transform.polar_rotation_transform(rotated)
+
+    plt.subplot(1,2,1)
+    polar_img_np = transformed_image_second_new[0].permute(1, 2, 0).numpy()
+    plt.imshow(polar_img_np)
+    plt.axis('off')
+    plt.title("Polar")
+    plt.subplot(1,2,2)
+    polar_img_np_rotated = transformed_rotated[0].permute(1, 2, 0).numpy()
+    plt.imshow(polar_img_np_rotated)
+    plt.axis('off')
+    plt.title("Polar")
+
+    plt.show()
 
     # Print the shape of the transformed image
     print("Input Image Shape:", images.shape)
@@ -241,7 +256,7 @@ if __name__ == "__main__":
 
     # Check if the pixel which is at cx-10, cy-10 in the original image has the same value in the polar image
     cx, cy = original_width // 2, original_height // 2
-    x, y = float(cx - 325), float(cy)
+    x, y = float(cx - 100), float(cy)
 
     x_y_grid = torch.tensor([x, y])
     

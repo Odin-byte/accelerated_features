@@ -52,11 +52,13 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
+import cv2
 
 from modules.model import *
 from modules.dataset.augmentation import *
 from modules.training.utils import *
 from modules.training.losses import *
+from modules.interpolator import InterpolateSparse2d
 
 from modules.dataset.megadepth.megadepth import MegaDepthDataset
 from modules.dataset.megadepth import megadepth_warper
@@ -76,7 +78,7 @@ class Trainer():
                        ckpt_save_path, 
                        model_name = 'xfeat_default',
                        batch_size = 10, n_steps = 160_000, lr= 3e-4, gamma_steplr=0.5, 
-                       training_res = (800, 608), device_num="0", dry_run = False,
+                       training_res = (800, 608), device_num="0", dry_run = False, plot_test = True,
                        save_ckpt_every = 500):
 
         self.dev = torch.device ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -132,11 +134,153 @@ class Trainer():
         os.makedirs(ckpt_save_path + '/logdir', exist_ok=True)
 
         self.dry_run = dry_run
+        self.plot_test = plot_test
         self.save_ckpt_every = save_ckpt_every
         self.ckpt_save_path = ckpt_save_path
         self.writer = SummaryWriter(ckpt_save_path + f'/logdir/{model_name}_' + time.strftime("%Y_%m_%d-%H_%M_%S"))
         self.model_name = model_name
 
+    def get_kpts_heatmap(self, kpts, softmax_temp = 1.0):
+        scores = F.softmax(kpts*softmax_temp, 1)[:, :64]
+        B, _, H, W = scores.shape
+        heatmap = scores.permute(0, 2, 3, 1).reshape(B, H, W, 8, 8)
+        heatmap = heatmap.permute(0, 1, 3, 2, 4).reshape(B, 1, H*8, W*8)
+        return heatmap
+    
+    def NMS(self, x, threshold = 0.05, kernel_size = 5):
+        B, _, H, W = x.shape
+        pad=kernel_size//2
+        local_max = nn.MaxPool2d(kernel_size=kernel_size, stride=1, padding=pad)(x)
+        pos = (x == local_max) & (x > threshold)
+        pos_batched = [k.nonzero()[..., 1:].flip(-1) for k in pos]
+
+        pad_val = max([len(x) for x in pos_batched])
+        pos = torch.zeros((B, pad_val, 2), dtype=torch.long, device=x.device)
+
+		#Pad kpts and build (B, N, 2) tensor
+        for b in range(len(pos_batched)):
+            pos[b, :len(pos_batched[b]), :] = pos_batched[b]
+
+        return pos
+    
+    def create_test_plot(self, tensor_image1, tensor_image2, current_step, min_cossim = 0.82):
+        top_k = 4096
+        interpolator = InterpolateSparse2d('bicubic')
+        # Check if there is a batch dim
+        if tensor_image1.dim() < 4:
+            tensor_image1 = tensor_image1.unsqueeze(0)
+
+        if tensor_image2.dim() < 4:
+            tensor_image2 = tensor_image2.unsqueeze(0)
+        # RGB -> Grey
+        tensor_image1_grey = tensor_image1.mean(1, keepdim=True)
+        tensor_image2_grey = tensor_image2.mean(1, keepdim=True)
+        #Forward pass
+        feats1, kpts1, hmap1 = self.net(tensor_image1_grey)
+        feats2, kpts2, hmap2 = self.net(tensor_image2_grey)
+
+        feat_maps = [feats1, feats2]
+        kpt_maps = [kpts1, kpts2]
+        heat_maps = [hmap1, hmap2]
+
+        B, _, _H1, _W1 = tensor_image1.shape
+        _H, _W = (_H1//32) * 32, (_W1//32) * 32
+        rh, rw = _H1/_H, _W1/_W
+
+        keypoints_imgs = []
+        descriptors_imgs = []
+        scores_imgs = []
+
+        for feature_map, kpt_map, heatmap in zip(feat_maps, kpt_maps, heat_maps):
+            # Keypoint extraction and matching
+            M1 = F.normalize(feature_map, dim=1)
+
+            #Convert logits to heatmap and extract kpts
+            K1h = self.get_kpts_heatmap(kpt_map)
+            mkpts = self.NMS(K1h, threshold=0.05, kernel_size=5)
+
+            #Compute reliability scores
+            _nearest = InterpolateSparse2d('nearest')
+            _bilinear = InterpolateSparse2d('bilinear')
+            scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(heatmap, mkpts, _H1, _W1)).squeeze(-1)
+            scores[torch.all(mkpts == 0, dim=-1)] = -1
+
+            #Select top-k features
+            idxs = torch.argsort(-scores)
+            mkpts_x  = torch.gather(mkpts[...,0], -1, idxs)[:, :top_k]
+            mkpts_y  = torch.gather(mkpts[...,1], -1, idxs)[:, :top_k]
+            mkpts = torch.cat([mkpts_x[...,None], mkpts_y[...,None]], dim=-1)
+            scores = torch.gather(scores, -1, idxs)[:, :top_k]
+
+            #Interpolate descriptors at kpts positions
+            feats = interpolator(M1, mkpts, H = _H1, W = _W1)
+
+            #L2-Normalize
+            feats = F.normalize(feats, dim=-1)
+
+            #Correct kpt scale
+            mkpts = mkpts * torch.tensor([rh,rw], device=mkpts.device).view(1, 1, -1)
+
+            valid = scores > 0
+
+            for b in range(B):
+                keypoints_imgs.append(mkpts[b][valid[b]])
+                descriptors_imgs.append(feats[b][valid[b]])
+                scores_imgs.append(scores[b][valid[b]])
+            
+        # Match the keypoints betweeen the two images
+
+        feats1 = descriptors_imgs[0]
+        feats2 = descriptors_imgs[1]
+
+        cossim = feats1 @ feats2.t()
+        cossim_t = feats2 @ feats1.t()
+		
+        _, match12 = cossim.max(dim=1)
+        _, match21 = cossim_t.max(dim=1)
+
+        idx0 = torch.arange(len(match12), device=match12.device)
+        mutual = match21[match12] == idx0
+
+        if min_cossim > 0:
+            cossim, _ = cossim.max(dim=1)
+            good = cossim > min_cossim
+            idx0 = idx0[mutual & good]
+            idx1 = match12[mutual & good]
+        else:
+            idx0 = idx0[mutual]
+            idx1 = match12[mutual]
+
+        matched_pts_in_img1, matched_pts_in_img2 = keypoints_imgs[0][idx0].cpu().numpy(), keypoints_imgs[1][idx1].cpu().numpy()
+
+        # Create a single image with both images next to each other with the lines between the matched points
+        concat_img = np.concat([tensor_image1.numpy(), tensor_image2.numpy()], axis=3).squeeze(0)
+        img = np.transpose(concat_img, (1, 2, 0))  # Now (H, W, 3)
+        img = img[..., ::-1]
+        # Get image widths
+        w1 = tensor_image1.shape[-1]  # width of first image
+        # matched_pts_in_img1 and matched_pts_in_img2 are (x, y)
+
+        # Shift second image's x coords
+        pts2_shifted = matched_pts_in_img2.copy()
+        pts2_shifted[:, 0] += w1  # shift x by width of first image
+
+        # OpenCV expects BGR
+        img_np_bgr = img[..., ::-1].copy()
+
+        # Draw matches
+        for (x1, y1), (x2, y2) in zip(matched_pts_in_img1.astype(int), pts2_shifted.astype(int)):
+            cv2.line(img_np_bgr, (x1, y1), (x2, y2), (0, 255, 255), 1)  # Yellow in BGR
+            cv2.circle(img_np_bgr, (x1, y1), 2, (0, 0, 255), -1)        # Red dot
+            cv2.circle(img_np_bgr, (x2, y2), 2, (0, 0, 255), -1)
+
+        # Convert BGR back to RGB for TensorBoard
+        img_np_rgb = img_np_bgr[..., ::-1].copy()
+
+        # Convert back to Torch (N, C, H, W)
+        img_tb = torch.from_numpy(img_np_rgb).permute(2, 0, 1) # uint8
+
+        self.writer.add_image("Training data", img_tb, global_step=current_step)
 
     def train(self):
 
@@ -183,6 +327,9 @@ class Trainer():
                     h_coarse, w_coarse = p1s[0].shape[-2] // 8, p1s[0].shape[-1] // 8
                     _ , positives_s_coarse = get_corresponding_pts(p1s, p2s, H1, H2, self.augmentor, h_coarse, w_coarse)
 
+                if self.plot_test:
+                    if i % 10 == 0:
+                        self.create_test_plot(d['image0'][0], d['image1'][0], current_step=i)
                 #Join megadepth & synthetic data
                 with torch.inference_mode():
                     #RGB -> GRAY

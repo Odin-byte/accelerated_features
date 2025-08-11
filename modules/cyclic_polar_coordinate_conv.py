@@ -32,7 +32,7 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
 
         self.cyclic_conv.set_stride(self.stride)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, center=None) -> torch.Tensor:
         """
         Forward pass of the custom layer.
 
@@ -46,7 +46,7 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
         self.kernel = self.kernel.to(x.device)
 
         # Apply polar rotation transform
-        polar_transformed = self.polar_transform(x)
+        polar_transformed = self.polar_transform(x, center)
 
         # Perform cyclic convolution
         cyclic_conv = self.cyclic_conv.forward(polar_transformed, self.kernel)
@@ -55,10 +55,12 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
 
 if __name__ == "__main__":
     # Load in a sample    # Read the image
-    image = cv2.imread('/home/docker/torch/code/accelerated_features/modules/test_data/four.png')
+    image = cv2.imread('/home/docker/torch/code/accelerated_features/modules/test_data/sunflower_rect.png')
 
     # Convert BGR image to RGB image
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    resized_image = cv2.resize(image, (400, 400), interpolation=cv2.INTER_LINEAR)
 
     # Define a transform to convert
     # the image to torch tensor
@@ -67,13 +69,10 @@ if __name__ == "__main__":
     ])
 
     # Rotate the image by 90 degrees
-    image_rot = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-
-    # Fill the image with zeros
-    image_rot = cv2.resize(image_rot, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+    image_rot = cv2.rotate(resized_image, cv2.ROTATE_90_CLOCKWISE)
 
     # Convert the image to Torch tensor
-    tensor = transform(image)
+    tensor = transform(resized_image)
     images = tensor.unsqueeze(0)
 
     tensor_rotated = transform(image_rot
@@ -82,10 +81,27 @@ if __name__ == "__main__":
     # Create an instance of the custom layer
     cyclic_polar_layer = CyclicPolarCoordinateConvLayer(in_channels=3, out_channels=3, kernel_size=3, stride=1)
 
-    # Forward pass
-    output_tensor = cyclic_polar_layer(images)
 
-    output_tensor_rotated = cyclic_polar_layer(tensor_rotated)
+    H, W = resized_image.shape[:2]
+    H = H//2
+    print(H, W)
+    original_center = (100, 100)
+
+    # After 90 deg clockwise rotation
+    rotated_center = (original_center[1] + H, original_center[0])  # (cy, W - 1 - cx)
+
+    print(rotated_center)
+
+    # Show both images with the corresponding center
+    cv2.drawMarker(resized_image, original_center, color=(0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+    cv2.imshow("Normal Image", resized_image)
+    cv2.drawMarker(image_rot, rotated_center, color=(0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+    cv2.imshow("Rotated Image", image_rot)
+
+    # Forward pass
+    output_tensor = cyclic_polar_layer(images, center=(100, 100))
+
+    output_tensor_rotated = cyclic_polar_layer(tensor_rotated, center=rotated_center)
     
     # Print the shape of the output tensor
     print("Output Tensor Shape:", output_tensor.shape)
@@ -107,5 +123,5 @@ if __name__ == "__main__":
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-    # Print the shape of the output tensor
-    print("Output Tensor Shape:", output_tensor.shape)
+    # # Print the shape of the output tensor
+    # print("Output Tensor Shape:", output_tensor.shape)

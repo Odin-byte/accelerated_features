@@ -58,28 +58,39 @@ class PolarRotationTransform():
         
         return self.output_image
 
-    def polar_rotation_grid(self, H, W, R=None, device="cpu"):
+    def polar_rotation_grid(self, H, W, R=None, device="cpu", gamma=1.0, center=None):
         if R is None:
             R = max(H, W)
+        if center is None:
+            cx, cy = (W - 1) / 2, (H - 1) / 2
+        else:
+            cx, cy = center
+
         q = torch.arange(H, device=device).view(-1, 1)
         p = torch.arange(W, device=device).view(1, -1)
-        r = q * R / max(H, W)
+
+        # Non-linear radial mapping
+        r = (q / (H - 1))**gamma * R
         theta = 2 * math.pi * p / W
-        x = r * torch.cos(theta) + (W - 1) / 2
-        y = r * torch.sin(theta) + (H - 1) / 2
+
+        x = r * torch.cos(theta) + cx
+        y = r * torch.sin(theta) + cy
+
         x_norm = 2 * (x / (W - 1)) - 1
         y_norm = 2 * (y / (H - 1)) - 1
         grid = torch.stack((x_norm, y_norm), dim=-1)
         return grid
     
-    def cartesian_to_polar_grid(self, H, W, R=None, device="cpu"):
+    def cartesian_to_polar_grid(self, H, W, R=None, device="cpu", gamma=1.0, center=None):
         if R is None:
             R = max(H, W)
+        if center is None:
+            cx, cy = (W - 1) / 2, (H - 1) / 2
+        else:
+            cx, cy = center
+
         y = torch.arange(H, device=device).view(-1, 1).expand(H, W)
         x = torch.arange(W, device=device).view(1, -1).expand(H, W)
-
-        cx = (W - 1) / 2
-        cy = (H - 1) / 2
 
         x_c = x - cx
         y_c = y - cy
@@ -88,21 +99,22 @@ class PolarRotationTransform():
         theta = torch.atan2(y_c, x_c)
         theta = (theta + 2 * math.pi) % (2 * math.pi)
 
-        q = r * max(H, W) / R
+        # Inverse of non-linear forward mapping
+        q = ((r / R).clamp(0, 1) ** (1.0 / gamma)) * (H - 1)
         p = theta * W / (2 * math.pi)
 
-        # Normalize to [-1, 1]
         q_norm = 2 * (q / (H - 1)) - 1
         p_norm = 2 * (p / (W - 1)) - 1
-
-        grid = torch.stack((p_norm, q_norm), dim=-1)  # (H, W, 2)
+        grid = torch.stack((p_norm, q_norm), dim=-1)
         return grid
-    def polar_rotation_transform(self, image):
+
+    
+    def polar_rotation_transform(self, image, center):
         # image: (N, C, H, W)
         N, C, H, W = image.shape
-        grid = self.polar_rotation_grid(H, W, device=image.device)  # (H, W, 2)
+        grid = self.polar_rotation_grid(H, W, center=center, device=image.device)  # (H, W, 2)
         grid = grid.unsqueeze(0).repeat(N, 1, 1, 1)  # (N, H, W, 2)
-        output = F.grid_sample(image, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        output = F.grid_sample(image, grid, mode='bilinear', padding_mode='border', align_corners=True)
         return output
     
     def restore_cartesian_img_grid_sample(self, polar_img, H, W, R=None):
@@ -110,7 +122,7 @@ class PolarRotationTransform():
         grid = self.cartesian_to_polar_grid(H, W, R, device=device)
         grid = grid.unsqueeze(0).repeat(polar_img.shape[0], 1, 1, 1)  # (N, H, W, 2)
         # Note: grid_sample expects (N, C, H, W) and grid (N, H, W, 2)
-        restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        restored = F.grid_sample(polar_img, grid, mode='bilinear', padding_mode='border', align_corners=True)
         return restored
     
     def cartesian_to_polar_indices(self, x, y, H, W, R=None):
@@ -163,9 +175,9 @@ class PolarRotationTransform():
         return x, y
 
 
-    def __call__(self, image: torch.Tensor) -> torch.Tensor:
+    def __call__(self, image: torch.Tensor, center) -> torch.Tensor:
         """Make the class callable."""
-        return self.polar_rotation_transform(image)
+        return self.polar_rotation_transform(image, center)
     
 def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=None):
         """

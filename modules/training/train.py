@@ -163,29 +163,29 @@ class Trainer():
 
         return pos
     
-    def create_test_plot(self, tensor_image1, tensor_image2, current_step, min_cossim = 0.82):
+    def create_test_plot(self, transform_data, current_step, min_cossim = 0.82):
         top_k = 4096
+        tensor_image0 = transform_data["image0"][0]
+        tensor_image1 = transform_data["image1"][0]
         interpolator = InterpolateSparse2d('bicubic')
+
         # Check if there is a batch dim
+        if tensor_image0.dim() < 4:
+            tensor_image0 = tensor_image0.unsqueeze(0)
+
         if tensor_image1.dim() < 4:
             tensor_image1 = tensor_image1.unsqueeze(0)
 
-        if tensor_image2.dim() < 4:
-            tensor_image2 = tensor_image2.unsqueeze(0)
-        # RGB -> Grey
-        tensor_image1_grey = tensor_image1.mean(1, keepdim=True)
-        tensor_image2_grey = tensor_image2.mean(1, keepdim=True)
+        B = tensor_image0.shape[0]
+        H_orig = tensor_image1.shape[-2]
+        W_orig = tensor_image1.shape[-1]
         #Forward pass
-        feats1, kpts1, hmap1 = self.net(tensor_image1_grey)
-        feats2, kpts2, hmap2 = self.net(tensor_image2_grey)
+        feats1, kpts1, hmap1 = self.net(tensor_image0)
+        feats2, kpts2, hmap2 = self.net(tensor_image1)
 
         feat_maps = [feats1, feats2]
         kpt_maps = [kpts1, kpts2]
         heat_maps = [hmap1, hmap2]
-
-        B, _, _H1, _W1 = tensor_image1.shape
-        _H, _W = (_H1//32) * 32, (_W1//32) * 32
-        rh, rw = _H1/_H, _W1/_W
 
         keypoints_imgs = []
         descriptors_imgs = []
@@ -202,7 +202,7 @@ class Trainer():
             #Compute reliability scores
             _nearest = InterpolateSparse2d('nearest')
             _bilinear = InterpolateSparse2d('bilinear')
-            scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(heatmap, mkpts, _H1, _W1)).squeeze(-1)
+            scores = (_nearest(K1h, mkpts, H_orig, W_orig) * _bilinear(heatmap, mkpts, H_orig, W_orig)).squeeze(-1)
             scores[torch.all(mkpts == 0, dim=-1)] = -1
 
             #Select top-k features
@@ -213,13 +213,13 @@ class Trainer():
             scores = torch.gather(scores, -1, idxs)[:, :top_k]
 
             #Interpolate descriptors at kpts positions
-            feats = interpolator(M1, mkpts, H = _H1, W = _W1)
+            feats = interpolator(M1, mkpts, H = H_orig, W = W_orig)
 
             #L2-Normalize
             feats = F.normalize(feats, dim=-1)
 
             #Correct kpt scale
-            mkpts = mkpts * torch.tensor([rh,rw], device=mkpts.device).view(1, 1, -1)
+            # mkpts = mkpts * torch.tensor([rh1,rw1], device=mkpts.device).view(1, 1, -1)
 
             valid = scores > 0
 
@@ -251,28 +251,65 @@ class Trainer():
             idx0 = idx0[mutual]
             idx1 = match12[mutual]
 
-        matched_pts_in_img1, matched_pts_in_img2 = keypoints_imgs[0][idx0].cpu().numpy(), keypoints_imgs[1][idx1].cpu().numpy()
+        matched_pts_in_img0, matched_pts_in_img1 = keypoints_imgs[0][idx0].cpu().numpy(), keypoints_imgs[1][idx1].cpu().numpy()
+
+        # Sanity check for the warp function
+
+        # Get scale factors (should be [sx, sy] or scalar)
+        if 'scale0' in transform_data and 'scale1' in transform_data:
+            scale0 = transform_data['scale0'][0]
+            scale1 = transform_data['scale1'][0]
+        else:
+            scale0 = torch.tensor([1.0, 1.0], device=tensor_image0.device)
+            scale1 = torch.tensor([1.0, 1.0], device=tensor_image1.device)
+
+        # Scale to match intrinsics space
+        matched_pts_in_img0_warp = keypoints_imgs[0][idx0].cpu() * scale0  # now in same space as K0
+
+        # Warp using scaled point
+        valid_mask, wrpd_points = megadepth_warper.warp_kpts(
+            matched_pts_in_img0_warp.unsqueeze(0),
+            transform_data['depth0'][0].unsqueeze(0),
+            transform_data['depth1'][0].unsqueeze(0),
+            transform_data['T_0to1'][0].unsqueeze(0),
+            transform_data['K0'][0].unsqueeze(0),
+            transform_data['K1'][0].unsqueeze(0)
+        )
+
+        # Scale points back into resized net image coordinates
+        wrpd_points = wrpd_points / scale1
+
+        error_list = [
+            np.linalg.norm(wrpd_points[0][i].cpu().numpy() - matched_pts_in_img1[i]) < 10
+            for i in range(len(matched_pts_in_img1))
+        ]        # Calculate the mean error between the matched points and the warped points
+        mean_error = np.mean([np.linalg.norm(wrpd_points[0][i].cpu().numpy() - matched_pts_in_img1[i]) for i in range(len(matched_pts_in_img1))])
+        
+        # Export the mean pixel error and the percentage of geometrically correctly matched points to tensorboard
+        self.writer.add_scalar("Accuracy/Mean pixel error", mean_error, global_step=current_step)
+        self.writer.add_scalar("Accuracy/Percentage of correct matches", np.mean(error_list), global_step=current_step)
 
         # Create a single image with both images next to each other with the lines between the matched points
-        concat_img = np.concat([tensor_image1.numpy(), tensor_image2.numpy()], axis=3).squeeze(0)
+        concat_img = np.concat([tensor_image0.numpy(), tensor_image1.numpy()], axis=3).squeeze(0)
         img = np.transpose(concat_img, (1, 2, 0))  # Now (H, W, 3)
         img = img[..., ::-1]
+
         # Get image widths
-        w1 = tensor_image1.shape[-1]  # width of first image
-        # matched_pts_in_img1 and matched_pts_in_img2 are (x, y)
+        w0 = tensor_image0.shape[-1]  # width of first image
 
         # Shift second image's x coords
-        pts2_shifted = matched_pts_in_img2.copy()
-        pts2_shifted[:, 0] += w1  # shift x by width of first image
+        pts2_shifted = matched_pts_in_img1.copy()
+        pts2_shifted[:, 0] += w0  # shift x by width of first image
 
         # OpenCV expects BGR
         img_np_bgr = img[..., ::-1].copy()
 
         # Draw matches
-        for (x1, y1), (x2, y2) in zip(matched_pts_in_img1.astype(int), pts2_shifted.astype(int)):
-            cv2.line(img_np_bgr, (x1, y1), (x2, y2), (0, 255, 255), 1)  # Yellow in BGR
-            cv2.circle(img_np_bgr, (x1, y1), 2, (0, 0, 255), -1)        # Red dot
-            cv2.circle(img_np_bgr, (x2, y2), 2, (0, 0, 255), -1)
+        for (x1, y1), (x2, y2), is_valid in zip(matched_pts_in_img0.astype(int), pts2_shifted.astype(int), error_list):
+            color = (0, 255, 255) if is_valid else (0, 0, 255)
+            cv2.line(img_np_bgr, (x1, y1), (x2, y2), color, 1)
+            cv2.circle(img_np_bgr, (x1, y1), 2, color, -1)
+            cv2.circle(img_np_bgr, (x2, y2), 2, color, -1)
 
         # Convert BGR back to RGB for TensorBoard
         img_np_rgb = img_np_bgr[..., ::-1].copy()
@@ -329,7 +366,7 @@ class Trainer():
 
                 if self.plot_test:
                     if i % 10 == 0:
-                        self.create_test_plot(d['image0'][0], d['image1'][0], current_step=i)
+                        self.create_test_plot(d, current_step=i)
                 #Join megadepth & synthetic data
                 with torch.inference_mode():
                     #RGB -> GRAY

@@ -109,7 +109,16 @@ class PolarRotationTransform():
         return grid
 
     
-    def polar_rotation_transform(self, image, center):
+    def polar_rotation_transform(self, image, center=None):
+        """Applies a polar rotation transformation to the input image.
+
+        Args:
+            image (torch.Tensor): Input image tensor of shape (N, C, H, W).
+            center (tuple, optional): Center point (x, y) for the rotation. Defaults to None.
+
+        Returns:
+            torch.Tensor: Transformed image tensor
+        """
         # image: (N, C, H, W)
         N, C, H, W = image.shape
         grid = self.polar_rotation_grid(H, W, center=center, device=image.device)  # (H, W, 2)
@@ -118,6 +127,17 @@ class PolarRotationTransform():
         return output
     
     def restore_cartesian_img_grid_sample(self, polar_img, H, W, R=None):
+        """Restores the cartesian image from the polar image using grid_sample.
+
+        Args:
+            polar_img (torch.Tensor): Torch Tensor encoding a polar map
+            H (int): Height of the original image
+            W (int): Width of the original image
+            R (int, optional): Maximum radius for the polar transformation. Defaults to None.
+
+        Returns:
+            torch.Tensor: Restored cartesian image
+        """
         device = polar_img.device
         grid = self.cartesian_to_polar_grid(H, W, R, device=device)
         grid = grid.unsqueeze(0).repeat(polar_img.shape[0], 1, 1, 1)  # (N, H, W, 2)

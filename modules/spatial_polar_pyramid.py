@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import cv2
 import torchvision.transforms as transforms
+from torchvision.transforms.functional import gaussian_blur
 import numpy as np
 from modules.cyclic_polar_coordinate_conv import CyclicPolarCoordinateConvLayer
 
@@ -16,17 +17,18 @@ class SpatialPolarPyramid(nn.Module):
             for _ in range(num_levels)
         ])
 
-    def split_and_process(self, x):
+    def split_and_process(self, x, overlap_ratio=0.5):
         N, C, H, W = x.shape
         level_tensors = []
         for level, conv in enumerate(self.convs):
             splits = 2 ** level
             patch_H, patch_W = H // splits, W // splits
+            stride = (int(patch_H * (1-overlap_ratio)), int(patch_W * (1-overlap_ratio)))
 
             # Collect patches for all images in the batch
             all_patches = []
             for n in range(N):
-                patches = F.unfold(x[n:n+1], kernel_size=(patch_H, patch_W), stride=(patch_H, patch_W))
+                patches = F.unfold(x[n:n+1], kernel_size=(patch_H, patch_W), stride=stride)
                 num_patches = patches.shape[-1]
                 patches = patches.transpose(1, 2).reshape(num_patches, C, patch_H, patch_W)
                 all_patches.append(patches)  # (num_patches, channels, patch_H, patch_W)
@@ -49,7 +51,7 @@ class PolarPatchStitching(nn.Module):
         self.batch_size = 2  # Set this dynamically if needed
         self.cyclic_conv = CyclicPolarCoordinateConvLayer(in_channels=1, out_channels=1, kernel_size=3, stride=1)
 
-    def stitch_patches(self, image_patches):
+    def stitch_patches(self, image_patches, overlap_ratio=0.5, apply_gaussian_blur=False, kernel_size=(7, 7), sigma=(1.5, 1.5)):
         # image_patches: (num_patches, channels, patch_H, patch_W)
         num_patches = image_patches.shape[0]
         channels = image_patches.shape[1]
@@ -58,16 +60,43 @@ class PolarPatchStitching(nn.Module):
         grid_size = int(torch.sqrt(torch.tensor(num_patches, dtype=torch.float32)))
         assert grid_size * grid_size == num_patches, "num_patches must be a perfect square"
 
-        # Arrange patches into rows
-        rows = []
-        for i in range(grid_size):
-            row_patches = image_patches[i * grid_size : (i + 1) * grid_size]  # (grid_size, channels, patch_H, patch_W)
-            row = torch.cat(list(row_patches), dim=2)  # concatenate along width
-            rows.append(row)
-        # Concatenate rows along height
-        stitched = torch.cat(rows, dim=1)  # concatenate along height
-        # stitched shape: (channels, grid_size * patch_H, grid_size * patch_W)
-        return stitched
+        # Set stride for overlap
+        stride_H = int(patch_H * (1 - overlap_ratio))
+        stride_W = int(patch_W * (1 - overlap_ratio))
+        stride_H = max(1, stride_H)
+        stride_W = max(1, stride_W)
+
+        # Prepare for fold
+        patches = image_patches.reshape(num_patches, channels * patch_H * patch_W)
+        patches = patches.transpose(0, 1).unsqueeze(0)  # (1, channels * patch_H * patch_W, num_patches)
+
+        # Calculate output size
+        out_H = stride_H * (grid_size - 1) + patch_H
+        out_W = stride_W * (grid_size - 1) + patch_W
+
+        # Fold to reconstruct
+        stitched = F.fold(
+            patches,
+            output_size=(out_H, out_W),
+            kernel_size=(patch_H, patch_W),
+            stride=(stride_H, stride_W)
+        )  # (1, channels, H, W)
+
+        # Create count map for averaging overlaps
+        ones = torch.ones((1, channels, out_H, out_W), dtype=stitched.dtype, device=stitched.device)
+        ones_patches = F.unfold(ones, kernel_size=(patch_H, patch_W), stride=(stride_H, stride_W))
+        count_map = F.fold(
+            ones_patches,
+            output_size=(out_H, out_W),
+            kernel_size=(patch_H, patch_W),
+            stride=(stride_H, stride_W)
+        )
+        stitched = stitched / count_map.clamp(min=1e-6)  # Avoid division by zero
+
+        if apply_gaussian_blur:
+            stitched = gaussian_blur(stitched, kernel_size=kernel_size, sigma=sigma)
+
+        return stitched.squeeze(0)  # (channels, H, W)
 
     def forward(self, level_tensors: list[torch.Tensor]):
         restored_levels = []

@@ -6,7 +6,6 @@
 import argparse
 import os
 import time
-import sys
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="XFeat training script.")
@@ -53,6 +52,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
 import cv2
+import random
 
 from modules.model import *
 from modules.dataset.augmentation import *
@@ -111,6 +111,8 @@ class Trainer():
 
 
         ##################### MEGADEPTH INIT ##########################
+        self.dry_run = dry_run
+
         if model_name in ('xfeat_default', 'xfeat_megadepth'):
             TRAIN_BASE_PATH = f"{megadepth_root_path}/train_data/megadepth_indices"
             TRAINVAL_DATA_SOURCE = f"{megadepth_root_path}/MegaDepth_v1"
@@ -120,10 +122,16 @@ class Trainer():
             npz_paths = glob.glob(TRAIN_NPZ_ROOT + '/*.npz')[:]
             data = torch.utils.data.ConcatDataset( [MegaDepthDataset(root_dir = TRAINVAL_DATA_SOURCE,
                             npz_path = path) for path in tqdm.tqdm(npz_paths, desc="[MegaDepth] Loading metadata")] )
-
-            self.data_loader = DataLoader(data, 
-                                          batch_size=int(self.batch_size * 0.6 if model_name=='xfeat_default' else batch_size),
-                                          shuffle=True)
+        
+            if self.dry_run:
+                self.data_loader = DataLoader(data, 
+                                              batch_size=int(self.batch_size * 0.6 if model_name=='xfeat_default' else batch_size),
+                                              shuffle=False)
+            else:
+                self.data_loader = DataLoader(data, 
+                                              batch_size=int(self.batch_size * 0.6 if model_name=='xfeat_default' else batch_size),
+                                              shuffle=True)
+                
             self.data_iter = iter(self.data_loader)
 
         else:
@@ -133,7 +141,13 @@ class Trainer():
         os.makedirs(ckpt_save_path, exist_ok=True)
         os.makedirs(ckpt_save_path + '/logdir', exist_ok=True)
 
-        self.dry_run = dry_run
+        if self.dry_run:
+            random.seed(42)
+            np.random.seed(42)
+            torch.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         self.plot_test = plot_test
         self.save_ckpt_every = save_ckpt_every
         self.ckpt_save_path = ckpt_save_path
@@ -418,7 +432,7 @@ class Trainer():
                     coords1 = self.net.fine_matcher(torch.cat([m1, m2], dim=-1))
 
                     #Compute losses
-                    loss_ds, conf = dual_softmax_loss(m1, m2)
+                    loss_ds, conf = dual_softmax_loss(m1, m2, temp=2.0)
                     loss_coords, acc_coords = coordinate_classification_loss(coords1, pts1, pts2, conf)
 
                     loss_kp_pos1, acc_pos1 = alike_distill_loss(kpts1[b], p1[b])

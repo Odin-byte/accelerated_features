@@ -18,6 +18,8 @@ def dual_softmax_loss(X, Y, temp = 0.2):
     with torch.no_grad():
         conf12 = torch.exp( conf_matrix12 ).max(dim=-1)[0]
         conf21 = torch.exp( conf_matrix21 ).max(dim=-1)[0]
+        # Conf is a vector of size N, where N is the number of keypoints / descriptors compared
+        # The confidence of a descriptor is only high, if both descriptor maps show equality in both directions
         conf = conf12 * conf21
 
     target = torch.arange(len(X), device = X.device)

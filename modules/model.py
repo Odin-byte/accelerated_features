@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from modules.cyclic_polar_coordinate_conv import CyclicPolarCoordinateConvLayer
+from modules.spatial_polar_pyramid import SpatialPolarPyramid, PolarPatchStitching, SELayer
 import time
 
 class BasicLayer(nn.Module):
@@ -45,7 +45,7 @@ class XFeatModel(nn.Module):
 
 		# CyclicPolarCoordinateConvLayer
 
-		self.cyclic_polar_conv = CyclicPolarCoordinateConvLayer(in_channels=1, out_channels=1, kernel_size=3, stride=1, padding=1)
+		self.spatial_polar_pyramid = SpatialPolarPyramid(in_channels=1, out_channels=1, num_levels=3, kernel_size=3)
 
 		self.block1 = nn.Sequential(
 										BasicLayer( 1,  4, stride=1),
@@ -83,9 +83,12 @@ class XFeatModel(nn.Module):
 										nn.Conv2d (64, 64, 1, padding=0)
 									 )
 		
-		# Add CyclicPolarCoordinateConvLayer to feats and heatmap heads
-		self.cyclic_feats = CyclicPolarCoordinateConvLayer(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1)
-		self.cyclic_heatmap = CyclicPolarCoordinateConvLayer(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1)
+		# Add stitching layer to reasamble the polar patches
+		self.polar_patch_stitching = PolarPatchStitching(num_levels=3)
+
+		self.channel_reduction = nn.Conv2d(192, 64, kernel_size=1)
+
+		self.sel_layer = SELayer(192, reduction=16)
 
 
 		self.heatmap_head = nn.Sequential(
@@ -148,20 +151,37 @@ class XFeatModel(nn.Module):
 			x = self.norm(x)
 
 		#main backbone
-		polar_x = self.cyclic_polar_conv(x)
-		x1 = self.block1(polar_x)
-		x2 = self.block2(x1 + self.skip1(polar_x))
-		x3 = self.block3(x2)
-		x4 = self.block4(x3)
-		x5 = self.block5(x4)
+		polar_patches = self.spatial_polar_pyramid(x)
+		list_of_feature_patches = []
 
-		#pyramid fusion
-		x4 = F.interpolate(x4, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
-		x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
+		for patch in polar_patches:
+			# print(patch.shape)
+			x1 = self.block1(patch)
+			x2 = self.block2(x1 + self.skip1(patch))
+			x3 = self.block3(x2)
+			x4 = self.block4(x3)
+			x5 = self.block5(x4)
+			#pyramid fusion
+			x4 = F.interpolate(x4, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
+			x5 = F.interpolate(x5, (x3.shape[-2], x3.shape[-1]), mode='bilinear')
 
-		fused = self.block_fusion(x3 + x4 + x5)
+			fused = self.block_fusion(x3 + x4 + x5)
+			list_of_feature_patches.append(fused)
 
-		feats = fused
+		deep_feats = self.polar_patch_stitching(list_of_feature_patches)
+
+
+		# deep_feats holds the fused features from all pyramid levels -> channel depth = 192
+		# This needs to be brought back down to 64 channels
+		# This can be done by a 1x1 convolution or an attention mechanism
+		# Before we reduce the channel number, we can learn to weight the different channels
+		feats_sel = self.sel_layer(deep_feats)
+		feats = self.channel_reduction(feats_sel)
+
+		# print(type(deep_feats))
+
+		# print(deep_feats.shape)
+
 		heatmap_input = feats
 		heatmap = self.heatmap_head(heatmap_input)  # Reliability map
 		keypoints = self.keypoint_head(self._unfold2d(x, ws=8)) #Keypoint map logits
@@ -172,7 +192,7 @@ class XFeatModel(nn.Module):
 if __name__ == "__main__":
 		# Test the model
 		model = XFeatModel()
-		x = torch.randn(1, 1, 800, 608)  # Example input tensor
+		x = torch.randn(10, 1, 800, 608)  # Example input tensor
 		feats, keypoints, heatmap = model(x)
 
 		print("Input shape:", x.shape)

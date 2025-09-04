@@ -17,7 +17,7 @@ class SpatialPolarPyramid(nn.Module):
             for _ in range(num_levels)
         ])
 
-    def split_and_process(self, x, overlap_ratio=0.5):
+    def split_and_process(self, x, overlap_ratio=0):
         N, C, H, W = x.shape
         level_tensors = []
         for level, conv in enumerate(self.convs):
@@ -48,10 +48,9 @@ class PolarPatchStitching(nn.Module):
     def __init__(self, num_levels=4):
         super().__init__()
         self.num_levels = num_levels
-        self.batch_size = 2  # Set this dynamically if needed
         self.cyclic_conv = CyclicPolarCoordinateConvLayer(in_channels=1, out_channels=1, kernel_size=3, stride=1)
 
-    def stitch_patches(self, image_patches, overlap_ratio=0.5, apply_gaussian_blur=False, kernel_size=(7, 7), sigma=(1.5, 1.5)):
+    def stitch_patches(self, image_patches, overlap_ratio=0, apply_gaussian_blur=False, kernel_size=(7, 7), sigma=(1.5, 1.5)):
         # image_patches: (num_patches, channels, patch_H, patch_W)
         num_patches = image_patches.shape[0]
         channels = image_patches.shape[1]
@@ -100,8 +99,9 @@ class PolarPatchStitching(nn.Module):
 
     def forward(self, level_tensors: list[torch.Tensor]):
         restored_levels = []
+        batch_size = level_tensors[0].shape[0]  # Assuming all levels have the same batch size
         for level_tensor in level_tensors:
-            num_patches = level_tensor.shape[0] // self.batch_size
+            num_patches = level_tensor.shape[0] // batch_size
             channels = level_tensor.shape[1]
             patch_H = level_tensor.shape[2]
             patch_W = level_tensor.shape[3]
@@ -112,12 +112,12 @@ class PolarPatchStitching(nn.Module):
             )  # Should support batch input
 
             # Unflatten back to (batch_size, num_patches, channels, patch_H, patch_W)
-            restored_unflattened = restored.view(self.batch_size, num_patches, channels, patch_H, patch_W)
+            restored_unflattened = restored.view(batch_size, num_patches, channels, patch_H, patch_W)
             restored_levels.append(restored_unflattened)
 
         # For every batch item, collect stitched images for each level
         batch_stitched = []
-        for b in range(self.batch_size):
+        for b in range(batch_size):
             stitched_per_level = []
             for level in restored_levels:
                 stitched_img = self.stitch_patches(level[b])  # (channels, H, W)
@@ -129,6 +129,23 @@ class PolarPatchStitching(nn.Module):
         # Stack to get (batch_size, num_levels * channels, H, W)
         output = torch.cat(batch_stitched, dim=0)
         return output
+    
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
 
 if __name__ == "__main__":
@@ -165,9 +182,12 @@ if __name__ == "__main__":
     # Add the flipped tensor as a second input along the batch dimension
     input_tensor = torch.cat([tensor.unsqueeze(0), flipped_tensor.unsqueeze(0)], dim=0)
 
+    x = torch.randn(1, 1, 800, 608)  # Example input tensor
 
 
-    patches = polar_pyramid_network(input_tensor)
+    patches = polar_pyramid_network(x)
+
+    print(type(patches))  # Should be a list of tensors, one for each level
 
     stitching_layer = PolarPatchStitching(num_levels=4)
     stitched_images = stitching_layer.forward(patches)

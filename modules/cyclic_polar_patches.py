@@ -2,7 +2,7 @@ import torch
 import cv2
 import torch.nn as nn
 import kornia
-from modules.cyclic_convolution import CyclicConvolution
+from modules.cyclic_polar_coordinate_conv import CyclicPolarCoordinateConvLayer
 import torchvision.transforms as transforms
 import torch.nn.functional as F
 
@@ -22,57 +22,44 @@ class PolarPatchGenerator(nn.Module):
             stride (int): Stride for the cyclic convolution. Default is 1.
         """
         super(PolarPatchGenerator, self).__init__()
-        self.cyclic_conv = CyclicConvolution()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.patch_size = patch_size
         self.kernel_size = kernel_size
         self.stride = stride
-
-        # Define a learnable kernel for cyclic convolution
-        self.kernel = nn.Parameter(
-            torch.randn(in_channels, out_channels, kernel_size, kernel_size, requires_grad=True)
-        )
-
-        self.cyclic_conv.set_stride(self.stride)
-
+        self.cyclic_polar_conv = CyclicPolarCoordinateConvLayer(in_channels, out_channels, kernel_size, stride)
 
     def extract_patches_bilinear(self, feats, points, patch_size):
         """
-        feats: (C, H, W)  - single image feature map
-        points: (N, 2)    - (x, y) in pixel coords
+        feats: (B, C, H, W)  - batched feature maps
+        points: (B, N, 2)    - batched (x, y) in pixel coords
         patch_size: int
-        Returns: (N, C, patch_size, patch_size)
+        Returns: (B, N, C, patch_size, patch_size)
         """
-        C, H, W = feats.shape
-        N = points.shape[0]  # number of points
-        half = patch_size / 2
+        B, C, H, W = feats.shape
+        N = points.shape[1]
+        PS = patch_size
+        half = PS / 2
 
-        # Normalize points to [-1, 1]
-        norm_x = (points[:, 0] / (W - 1)) * 2 - 1
-        norm_y = (points[:, 1] / (H - 1)) * 2 - 1
+        # Normalize points to [-1, 1] (align_corners=True convention)
+        norm_x = (points[:, :, 0] / (W - 1)) * 2 - 1
+        norm_y = (points[:, :, 1] / (H - 1)) * 2 - 1
+        centers = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(2).unsqueeze(2)  # (B, N, 1, 1, 2)
 
-        # Create sampling grid for a single patch
-        patch_linspace_x = torch.linspace(-half / (W / 2), half / (W / 2), patch_size, device=feats.device)
-        patch_linspace_y = torch.linspace(-half / (H / 2), half / (H / 2), patch_size, device=feats.device)
-        grid_x, grid_y = torch.meshgrid(patch_linspace_x, patch_linspace_y, indexing="xy")
-        grid = torch.stack((grid_x, grid_y), dim=-1)  # (patch_size, patch_size, 2)
+        # Patch offsets in normalized coords
+        ox = torch.linspace(-half / (W / 2), half / (W / 2), PS, device=feats.device)
+        oy = torch.linspace(-half / (H / 2), half / (H / 2), PS, device=feats.device)
+        grid_x, grid_y = torch.meshgrid(ox, oy, indexing="xy")
+        offsets = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0).unsqueeze(0)  # (1, 1, PS, PS, 2)
 
-        # Expand to N points
-        grid = grid.unsqueeze(0).expand(N, patch_size, patch_size, 2)
+        # Build per-point grids and flatten to (B*N, PS, PS, 2)
+        grid = (offsets + centers).reshape(B * N, PS, PS, 2)
 
-        # Add center coords
-        center = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(1).unsqueeze(1)  # (N,1,1,2)
-        grid = grid + center
+        # Tile feats per point: (B*N, C, H, W)
+        feats_bn = feats.unsqueeze(1).expand(B, N, C, H, W).reshape(B * N, C, H, W)
 
-        # Prepare feats for grid_sample: (1, C, H, W)
-        feats = feats.unsqueeze(0)  # add batch dim
-
-        # grid_sample wants (N, H_out, W_out, 2) with feats repeated N times
-        feats_expanded = feats.expand(N, -1, -1, -1)
-        patches = F.grid_sample(feats_expanded, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
-
-        return patches  # (N, C, patch_size, patch_size)
+        patches = F.grid_sample(feats_bn, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        return patches.reshape(B, N, C, PS, PS)
 
 
     def forward(self, x: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
@@ -86,24 +73,19 @@ class PolarPatchGenerator(nn.Module):
         Returns:
             torch.Tensor: Output tensor after applying polar rotation and cyclic convolution to every patch of shape (batch, number_of_patches, channels, patch_size, patch_size).
         """
-        # Ensure the kernel is on the same device as the input tensor
-        self.kernel = self.kernel.to(x.device)
-
-        C, H, W = x.shape  # input from CNN
+        B, C, H, W = x.shape  # input from CNN
         N = points.shape[1]    # number of points
 
         patches = self.extract_patches_bilinear(x, points, self.patch_size)
-
         # Perform cyclic convolution
-        N, C, H, W = patches.shape
-        patches_reshaped = patches.view(N, C, H, W)
-        cyclic_conv_patches = self.cyclic_conv.forward(patches_reshaped, self.kernel)
+        B, N, C, H, W = patches.shape
+        patches_reshaped = patches.view(B * N, C, H, W)
+        polar_cyclic_conv_patches = self.cyclic_polar_conv.forward(patches_reshaped)
         # Restore grouping into (B, N, ...)
-        cyclic_conv_patches = cyclic_conv_patches.view(N, cyclic_conv_patches.shape[1],
-                                                    cyclic_conv_patches.shape[2],
-                                                    cyclic_conv_patches.shape[3])
-
-        return cyclic_conv_patches
+        polar_cyclic_conv_patches = polar_cyclic_conv_patches.view(B, N, polar_cyclic_conv_patches.shape[1],
+                                                    polar_cyclic_conv_patches.shape[2],
+                                                    polar_cyclic_conv_patches.shape[3])
+        return polar_cyclic_conv_patches
 
 if __name__ == "__main__":
     # Load in a sample    # Read the image
@@ -119,36 +101,84 @@ if __name__ == "__main__":
     ])
 
     # Convert the image to Torch tensor
-    tensor = transform(image)
+    first_image = transform(image)
 
-    test_keypoints = torch.Tensor([[300, 300]])
+    # Get a point 50 pixel from the center and 70 pixel down
+    H, W = first_image.shape[1], first_image.shape[2]
+    point1 = torch.tensor([[[W//2 + 50, H//2 + 70]]], dtype=torch.float32)  # Shape (1, 1, 2)
 
-    print(f"Needed point tensor shape: {test_keypoints.shape}")
+    # Shift the image by 40 pixels to the right
+    translation = torch.tensor([[1, 0, 40],
+                                [0, 1, 0]], dtype=torch.float32)
+    shifted_image = kornia.geometry.transform.warp_affine(
+        first_image.unsqueeze(0),
+        translation.unsqueeze(0),
+        dsize=(W, H),
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    ).squeeze(0)
 
+    # Rotate the image by 90 degrees clockwise around the center
+    # center = torch.tensor([[W / 2, H / 2]], dtype=torch.float32)  # (1,2)
+    # angle = torch.tensor([-90.0], dtype=torch.float32)            # (1,)
+    # scale  = torch.tensor([[1.0, 1.0]], dtype=torch.float32) 
+    # rotation_matrix = kornia.geometry.transform.get_rotation_matrix2d(center, angle, scale)
+    # rotated_image = kornia.geometry.transform.warp_affine(
+    #     first_image.unsqueeze(0),
+    #     rotation_matrix,
+    #     dsize=(W, H),
+    #     mode="bilinear",
+    #     padding_mode="border",
+    #     align_corners=True,
+    # ).squeeze(0)
 
-    polar_patches = PolarPatchGenerator(3, 3, 32, 3)
-    polar_patches = polar_patches.forward(tensor, test_keypoints)
-    print(polar_patches.shape)
+    # Update rotated point
+    # ones = torch.ones((1, 1, 1), dtype=torch.float32)
+    # point1_homogeneous = torch.cat([point1, ones], dim=-1)  # (1, 1, 3)
+    # rotation_matrix_3x3 = torch.eye(3)
+    # rotation_matrix_3x3[:2, :] = rotation_matrix[0]
+    # rotated_point1_homogeneous = (rotation_matrix_3x3 @ point1_homogeneous.transpose(1, 2)).transpose(1, 2)
+    # rotated_point1 = rotated_point1_homogeneous[:, :, :2]
 
+    # 90° clockwise
+    rotated_image = torch.rot90(first_image, k=-1, dims=(1, 2))  # (C, H, W) -> (C, W, H)
 
-    patches = polar_patches.squeeze(0)
-    print(patches.shape)
-    print(patches[0].shape)
+    # Update point (x, y) -> (x', y') for 90° CW on (H, W):
+    x, y = point1[0, 0, 0], point1[0, 0, 1]
+    x_new = H - 1 - y
+    y_new = x
+    rotated_point1 = torch.tensor([[[x_new, y_new]]], dtype=torch.float32)
 
-    img = patches.detach().cpu().numpy()  # Convert to numpy
-    print(img.shape)
-    img = img.transpose(1, 2, 0)             # C,H,W -> H,W,C
-    print(img.shape)
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    # Create an instance of the custom layer
+    polar_patch_generator = PolarPatchGenerator(in_channels=3, out_channels=3, patch_size=65, kernel_size=3, stride=1)
 
-    # Normalize img to 0-255 uint8 for visualization
-    img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-    img = (img * 255).astype('uint8')
+    # Generate polar patches around the point in the original image
+    patches_original = polar_patch_generator.forward(first_image.unsqueeze(0), point1)  # Shape (1, 1, 3, patch_size, patch_size)
+    # Generate polar patches around the rotated point in the rotated image
+    patches_rotated = polar_patch_generator.forward(rotated_image.unsqueeze(0), rotated_point1)  # Shape (1, 1, 3, patch_size, patch_size)
 
-    # If single channel, convert grayscale to BGR
-    if img.shape[2] == 1:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    # Show both images with the corresponding point
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(first_image.permute(1, 2, 0).numpy())
+    plt.scatter(point1[0, 0, 0].item(), point1[0, 0, 1].item(), c='r', marker='x')
+    plt.title('Original Image with Point')
+    plt.subplot(1, 2, 2)
+    plt.imshow(rotated_image.permute(1, 2, 0).numpy())
+    plt.scatter(rotated_point1[0, 0, 0].item(), rotated_point1[0, 0, 1].item(), c='r', marker='x')
+    plt.title('Rotated Image with Rotated Point')
+    plt.show()
 
-    cv2.imshow("Patch 0", img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    # Visualize the extracted patches
+    patch_original = patches_original[0, 0].permute(1, 2, 0).detach().numpy()
+    patch_rotated = patches_rotated[0, 0].permute(1, 2, 0).detach().numpy()
+    plt.figure(figsize=(8, 4))
+    plt.subplot(1, 2, 1)
+    plt.imshow(patch_original)
+    plt.title('Polar Patch from Original Image')
+    plt.subplot(1, 2, 2)
+    plt.imshow(patch_rotated)
+    plt.title('Polar Patch from Rotated Image')
+    plt.show()

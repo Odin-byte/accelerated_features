@@ -4,6 +4,77 @@ import pdb
 
 debug_cnt = -1
 
+def warp_synthetic_points(points_img1, p2, H, H2, augmentor, batch_idx):
+    '''
+        Warp 2D points pts with homography H
+        pts: [N, 2]
+        H: [3, 3]
+    '''
+    negatives, positives = [], []
+    with torch.no_grad():
+        #real input res of samples
+        rh, rw = p2.shape[-2:]
+        # ratio = torch.tensor([rw/w, rh/h], device = p1.device)
+
+        (H, mask1) = H
+        (H2, src, W, A, mask2) = H2
+
+        #Generate meshgrid of target pts
+        # x, y = torch.meshgrid(torch.arange(w, device=p1.device), torch.arange(h, device=p1.device), indexing ='xy')
+        # mesh = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)
+        # target_pts = mesh.view(-1, 2) * ratio
+
+        #Pack all transformations into T
+        with torch.no_grad():
+            T = (H2[batch_idx], H[batch_idx], 
+                src[batch_idx].unsqueeze(0), W[batch_idx].unsqueeze(0), A[batch_idx].unsqueeze(0))
+            #We now warp the given points of p1 points to p2
+            transformed_points = (augmentor.get_correspondences(points_img1, T) ) #target to src 
+        
+            #Check out of bounds points
+            mask_valid = (transformed_points[:, 0] >=0) & (transformed_points[:, 1] >=0) & \
+                        (transformed_points[:, 0] < rw) & (transformed_points[:, 1] < rh)
+
+            transformed_points = transformed_points[mask_valid]
+
+    return transformed_points
+
+def warp_points_syn(points, H):
+    # points: (N, 2), H: (3, 3)
+    H = H.squeeze(0)
+    print(f"Shape of H: {H.shape}")
+    ones = torch.ones(len(points), 1, device=points.device, dtype=points.dtype)
+    pts_h = torch.cat([points, ones], dim=-1)               # (N, 3)
+    warped_h = (H @ pts_h.T).T                              # (N, 3)
+    warped = warped_h[:, :2] / warped_h[:, 2:3].clamp(min=1e-8)
+    return warped   
+
+def get_matching_idx(transformed_points, original_points, threshold=3.0):
+    '''
+        Given transformed points and original points, find the matching indices
+        based on a distance threshold.
+    '''
+    transformed_points = transformed_points.cpu().numpy()
+    original_points = original_points.cpu().numpy()
+    
+    # Compute pairwise distances
+    distances = np.linalg.norm(transformed_points[:, None, :] - original_points[None, :, :], axis=2)
+    
+    # Find closest original point for each transformed point
+    matched_indices_original = np.argmin(distances, axis=1)
+    min_dists = np.min(distances, axis=1)
+    
+    if threshold > 0:
+        # Filter by threshold
+        valid_matches = min_dists < threshold
+        matched_indices_original = matched_indices_original[valid_matches]
+        matched_indices_transformed = np.where(valid_matches)[0]
+
+    else:
+        matched_indices_transformed = np.arange(len(transformed_points))
+    
+    return matched_indices_transformed, matched_indices_original
+
 def make_batch(augmentor, difficulty = 0.3, train = True):
     Hs = []
     img_list = augmentor.train if train else augmentor.test

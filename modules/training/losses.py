@@ -7,6 +7,32 @@ from modules.training import utils
 
 from third_party.alike_wrapper import extract_alike_kpts
 
+def triplet_loss(m1, m2, margin=0.2, temp=2.0):
+    m1 = F.normalize(m1, dim=-1)
+    m2 = F.normalize(m2, dim=-1)
+    
+    # Positive similarity
+    pos_sim = (m1 * m2).sum(dim=-1)  # (K,) - cosine similarity
+    
+    # Hard negatives: most similar non-match
+    sim_mat = m1 @ m2.t()  # (K, K)
+    sim_mat.fill_diagonal_(-float('inf'))
+    hard_neg_sim, _ = sim_mat.max(dim=1)
+    
+    # Loss based on distances
+    pos_dist = 1 - pos_sim
+    neg_dist = 1 - hard_neg_sim
+    loss = (pos_dist - neg_dist + margin).clamp(min=0).mean()
+    
+    # Confidence: positive sim relative to hard negative
+    # If pos_sim >> hard_neg_sim, confidence is high
+    with torch.no_grad():
+        # Scale by temperature and softmax
+        logits = torch.stack([pos_sim, hard_neg_sim], dim=-1) * temp  # (K, 2)
+        conf = F.softmax(logits, dim=-1)[:, 0]  # Probability that positive is best
+    
+    return loss, conf
+
 def dual_softmax_loss(X, Y, temp = 0.2):
     if X.size() != Y.size() or X.dim() != 2 or Y.dim() != 2:
         raise RuntimeError('Error: X and Y shapes must match and be 2D matrices')

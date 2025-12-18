@@ -539,7 +539,7 @@ class Trainer():
                         coords1 = self.net.fine_matcher(torch.cat([m1, m2], dim=-1))
 
                         #Compute losses
-                        loss_ds, conf = triplet_loss(m1, m2, margin=0.5, temp=2.0)
+                        loss_ds, conf = circle_loss(m1, m2, margin=0.5, scale=64)
                         loss_coords, acc_coords = coordinate_classification_loss(coords1, pts1, pts2, conf)
     
                         # print(f"Shapes in Keypoint loss: h1: {h1.shape}, h2: {h2.shape}, conf: {conf.shape}")

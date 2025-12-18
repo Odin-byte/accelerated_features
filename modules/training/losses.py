@@ -7,6 +7,36 @@ from modules.training import utils
 
 from third_party.alike_wrapper import extract_alike_kpts
 
+def circle_loss(m1, m2, margin=0.4, scale=64):
+    """Circle Loss - more sophisticated than triplet loss"""
+    m1 = F.normalize(m1, dim=-1)
+    m2 = F.normalize(m2, dim=-1)
+    
+    # Positive similarities
+    sp = (m1 * m2).sum(dim=-1)  # (K,)
+    
+    # Negative similarities
+    sim_mat = m1 @ m2.t()  # (K, K)
+    mask = torch.eye(len(m1), device=m1.device).bool()
+    sn = sim_mat[~mask].reshape(len(m1), -1)  # (K, K-1)
+    
+    # Circle loss formulation
+    alpha_p = (1 - margin - sp).clamp(min=0).detach()
+    alpha_n = (sn + margin).clamp(min=0).detach()
+    
+    # Weighted log-sum-exp
+    logit_p = -scale * alpha_p * (sp - 1 + margin)
+    logit_n = scale * alpha_n * (sn - margin)
+    
+    loss = F.softplus(torch.logsumexp(logit_n, dim=1) + logit_p).mean()
+    
+    # Confidence
+    with torch.no_grad():
+        hard_neg_sim, _ = sim_mat.fill_diagonal_(-float('inf')).max(dim=1)
+        conf = (sp - hard_neg_sim).sigmoid()  # Gap as confidence
+    
+    return loss, conf
+
 def triplet_loss(m1, m2, margin=0.2, temp=2.0):
     m1 = F.normalize(m1, dim=-1)
     m2 = F.normalize(m2, dim=-1)

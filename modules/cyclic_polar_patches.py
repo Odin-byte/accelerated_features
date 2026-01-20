@@ -58,7 +58,7 @@ class PolarPatchGenerator(nn.Module):
         # Tile feats per point: (B*N, C, H, W)
         feats_bn = feats.unsqueeze(1).expand(B, N, C, H, W).reshape(B * N, C, H, W)
 
-        patches = F.grid_sample(feats_bn, grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        patches = F.grid_sample(feats_bn, grid, mode='bilinear', padding_mode='border', align_corners=True)
         return patches.reshape(B, N, C, PS, PS)
 
 

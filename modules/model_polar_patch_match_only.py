@@ -31,10 +31,11 @@ class XFeatPolarPatchDescriptorGen(nn.Module):
 	   "XFeat: Accelerated Features for Lightweight Image Matching, CVPR 2024."
 	"""
 
-	def __init__(self, patch_size=32):
+	def __init__(self, patch_size=32, log_polar=False):
 		super().__init__()
 		self.norm = nn.InstanceNorm2d(1)
 		self.patch_size = patch_size
+		self.log_polar = log_polar
 
 
 		########### ⬇️ CNN Backbone & Heads ⬇️ ###########
@@ -51,6 +52,7 @@ class XFeatPolarPatchDescriptorGen(nn.Module):
 			out_channels=1,
 			patch_size=self.patch_size,
 			kernel_size=3,
+			log_polar=self.log_polar
 		)
 
 		self.block1 = nn.Sequential(
@@ -88,41 +90,6 @@ class XFeatPolarPatchDescriptorGen(nn.Module):
 										BasicLayer(64, 64, stride=1),
 										nn.Conv2d (64, 64, 1, padding=0)
 									 )
-
-
-		self.heatmap_head = nn.Sequential(
-										BasicLayer(64, 64, 1, padding=0),
-										BasicLayer(64, 64, 1, padding=0),
-										nn.Conv2d (64, 1, 1),
-										nn.Sigmoid()
-									)
-
-
-		self.keypoint_head = nn.Sequential(
-										BasicLayer(64, 64, 1, padding=0),
-										BasicLayer(64, 64, 1, padding=0),
-										BasicLayer(64, 64, 1, padding=0),
-										nn.Conv2d (64, 65, 1),
-									)
-
-
-  		########### ⬇️ Fine Matcher MLP ⬇️ ###########
-
-		self.fine_matcher =  nn.Sequential(
-											nn.Linear(128, 512),
-											nn.BatchNorm1d(512, affine=False),
-									  		nn.ReLU(inplace = True),
-											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
-									  		nn.ReLU(inplace = True),
-											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
-									  		nn.ReLU(inplace = True),
-											nn.Linear(512, 512),
-											nn.BatchNorm1d(512, affine=False),
-									  		nn.ReLU(inplace = True),
-											nn.Linear(512, 64),
-										)
 
 	def _unfold2d(self, x, ws = 2):
 		"""

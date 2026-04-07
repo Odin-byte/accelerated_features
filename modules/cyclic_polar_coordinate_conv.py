@@ -9,7 +9,7 @@ import torchvision.transforms as transforms
 
 
 class CyclicPolarCoordinateConvLayer(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, log_polar: bool = False):
         """
         Custom PyTorch layer that applies a polar rotation transform followed by a cyclic convolution.
 
@@ -18,7 +18,7 @@ class CyclicPolarCoordinateConvLayer(nn.Module):
             stride (int): Stride for the cyclic convolution. Default is 1.
         """
         super(CyclicPolarCoordinateConvLayer, self).__init__()
-        self.polar_transform = PolarRotationTransform()
+        self.polar_transform = PolarRotationTransform(log_polar=log_polar)
         self.cyclic_conv = CyclicConvolution()
         self.in_channels = in_channels
         self.out_channels = out_channels

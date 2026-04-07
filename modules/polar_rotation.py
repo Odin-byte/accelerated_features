@@ -274,7 +274,7 @@ if __name__ == "__main__":
     rotated = transform(rotated).unsqueeze(0)
 
     # Create an instance of the PolarRotationTransform class
-    polar_transform = PolarRotationTransform(log_polar=True)
+    polar_transform = PolarRotationTransform(log_polar=False)
 
     original_height, original_width = images.shape[2], images.shape[3]
 
@@ -309,7 +309,7 @@ if __name__ == "__main__":
     x_y_grid = torch.tensor([x, y])
     
     # Get polar indices
-    q, p = cartesian_to_polar_indices_tensor(x_y_grid, original_height, original_width, log_polar=True)    
+    q, p = cartesian_to_polar_indices_tensor(x_y_grid, original_height, original_width, log_polar=False)    
 
     # Show the first transformed image of the batch using both methods
     plt.subplot(1, 2, 1)

@@ -51,6 +51,8 @@ def parse_arguments():
                         help='Temperature parameter for dual softmax descriptor loss. Default is 2.0.')
     parser.add_argument('--patch_size', type=int, default=32,
                         help='Polar patch size used by the descriptor backbone. Default is 32.')
+    parser.add_argument('--log_polar', action='store_true',
+                        help='Whether to use log-polar coordinates. Default is False.')
     parser.add_argument('--wandb_project', type=str, default='xfeat_polar_patch_descriptor_matching',
                         help='W&B project name.')
     parser.add_argument('--wandb_entity', type=str, default='dominik-w-ho',
@@ -97,13 +99,14 @@ class Trainer():
                        batch_size = 10, n_steps = 160_000, lr= 3e-4, gamma_steplr=0.5, 
                        training_res = (800, 608), device_num="0", dry_run = False, plot_test = False,
                        save_ckpt_every = 500, val_ratio = 0.05, val_every = 500, val_batches = 10, val_seed = 42,
-                       num_val_synth_imgs = 100, dual_softmax_temp = 2.0, patch_size = 32,
+                       num_val_synth_imgs = 100, dual_softmax_temp = 2.0, patch_size = 32, log_polar = False,
                        wandb_project = 'xfeat_polar_patch_descriptor_matching', wandb_entity = 'dominik-w-ho'):
 
         self.batch_size = batch_size
         self.steps = n_steps
         self.dual_softmax_temp = dual_softmax_temp
         self.patch_size = patch_size
+        self.log_polar = log_polar
         self.best_val_total = float('inf')
 
         run_config = {
@@ -126,6 +129,7 @@ class Trainer():
             'num_val_synth_imgs': num_val_synth_imgs,
             'dual_softmax_temp': dual_softmax_temp,
             'patch_size': patch_size,
+            'log_polar': log_polar,
         }
 
         if wandb.run is None:
@@ -140,7 +144,7 @@ class Trainer():
             self.wandb_run.config.update(run_config, allow_val_change=True)
 
         self.dev = torch.device ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.net = XFeatPolarPatchDescriptorGen(patch_size=self.patch_size).to(self.dev)
+        self.net = XFeatPolarPatchDescriptorGen(patch_size=self.patch_size, log_polar=self.log_polar).to(self.dev)
 
         #Setup optimizer 
         self.opt = optim.Adam(filter(lambda x: x.requires_grad, self.net.parameters()) , lr = lr)
@@ -252,7 +256,7 @@ class Trainer():
 
         for b in range(len(positives_c)):
             #Get positive correspondencies
-            pts1, pts2 = positives_c[b][:, :2], positives_c[b][:, 2:]
+            pts1, pts2 = positives_c[b][:, :2] * 8, positives_c[b][:, 2:] * 8
 
             #Generate descriptors at kpts positions
             feats1 = self.net(p1[b].unsqueeze(0), pts1.unsqueeze(0)).squeeze(0)
@@ -420,9 +424,6 @@ class Trainer():
                     # print(f"len(positives_c[{b}]): {len(positives_c[b])}")
                     #Get positive correspondencies
                     pts1, pts2 = positives_c[b][:, :2] * 8, positives_c[b][:, 2:] * 8
-                    # Print the min and max of pts1 and pts2 to check if they are within the image bounds
-                    print(f"pts1 min: {pts1.min(dim=0).values}, max: {pts1.max(dim=0).values}")
-                    print(f"pts2 min: {pts2.min(dim=0).values}, max: {pts2.max(dim=0).values}")
 
                     #Generate descriptors at kpts positions
                     feats1 = self.net(p1[b].unsqueeze(0), pts1.unsqueeze(0)).squeeze(0)
@@ -485,6 +486,7 @@ def run_from_args(args):
         num_val_synth_imgs=args.num_val_synth_imgs,
         dual_softmax_temp=args.dual_softmax_temp,
         patch_size=args.patch_size,
+        log_polar=args.log_polar,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
     )

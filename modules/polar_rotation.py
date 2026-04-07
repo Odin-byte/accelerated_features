@@ -9,8 +9,9 @@ import numpy as np
 
 
 class PolarRotationTransform():
-    def __init__(self):
+    def __init__(self, log_polar=False):
         self.output_image = None
+        self.log_polar = log_polar
 
     def transform(self, image: torch.Tensor) -> torch.Tensor:
         """Apply a polar rotation transform to the input image. 
@@ -70,7 +71,10 @@ class PolarRotationTransform():
         p = torch.arange(W, device=device).view(1, -1)
 
         # Non-linear radial mapping
-        r = (q / (H - 1))**gamma * R
+        if self.log_polar:
+            r = torch.exp(q / (H - 1) * math.log(R + 1)) - 1
+        else:
+            r = (q / (H - 1))**gamma * R
         theta = 2 * math.pi * p / W
 
         x = r * torch.cos(theta) + cx
@@ -100,7 +104,10 @@ class PolarRotationTransform():
         theta = (theta + 2 * math.pi) % (2 * math.pi)
 
         # Inverse of non-linear forward mapping
-        q = ((r / R).clamp(0, 1) ** (1.0 / gamma)) * (H - 1)
+        if self.log_polar:
+            q = torch.log(r.clamp(min=0) + 1) / math.log(R + 1) * (H - 1)
+        else:
+            q = ((r / R).clamp(0, 1) ** (1.0 / gamma)) * (H - 1)
         p = theta * W / (2 * math.pi)
 
         q_norm = 2 * (q / (H - 1)) - 1
@@ -157,7 +164,7 @@ class PolarRotationTransform():
         dtype = x.dtype
 
         if R is None:
-            R = (max(H,W)-1)
+            R = (max(H,W))
 
         cx = (W - 1) / 2
         cy = (H - 1) / 2
@@ -166,7 +173,10 @@ class PolarRotationTransform():
         r = torch.sqrt(x_c**2 + y_c**2)
         theta = torch.atan2(y_c, x_c)
         theta = (theta + 2 * torch.pi) % (2 * torch.pi)
-        q = r * max(H, W) / R
+        if self.log_polar:
+            q = torch.log(r + 1) / math.log(R + 1) * max(H, W)
+        else:
+            q = r * max(H, W) / R        
         p = theta * W / (2 * torch.pi)
         return p, q
 
@@ -182,11 +192,14 @@ class PolarRotationTransform():
         dtype = p.dtype
 
         if R is None:
-            R = (max(H, W)-1)
+            R = (max(H, W))
         cx = (W - 1) / 2
         cy = (H - 1) / 2
 
-        r = q * R / max(H, W)
+        if self.log_polar:
+            r = torch.exp(q / max(H, W) * math.log(R + 1)) - 1
+        else:
+            r = q * R / max(H, W)        
         theta = p * 2 * torch.pi / W
 
         x = r * torch.cos(theta) + cx
@@ -199,7 +212,7 @@ class PolarRotationTransform():
         """Make the class callable."""
         return self.polar_rotation_transform(image, center)
     
-def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=None):
+def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=None, log_polar=False):
         """
         Args:
             xy_grid: Tensor of shape (N, H, W, 2) or (H, W, 2) with coordinates in (x, y) format.
@@ -211,7 +224,7 @@ def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=N
             polar_indices: Tensor of shape (..., 2) with (p, q) indices
         """
         if R is None:
-            R = min(H, W)
+            R = max(H, W)
 
         # Center coordinates
         cx = W / 2.0
@@ -221,10 +234,13 @@ def cartesian_to_polar_indices_tensor(xy_grid: torch.Tensor, H: int, W: int, R=N
         y = xy_grid[..., 1] - cy
 
         r = torch.sqrt(x ** 2 + y ** 2)
+        if log_polar:
+            q = torch.log(r + 1) / math.log(R + 1) * H
+        else:
+            q = r * H / R
         theta = torch.atan2(y, x)
         theta = torch.remainder(theta, 2 * math.pi)  # Ensures [0, 2pi)
 
-        q = r * H / R
         p = theta * W / (2 * math.pi)
 
         return torch.stack((p, q), dim=-1)
@@ -258,7 +274,7 @@ if __name__ == "__main__":
     rotated = transform(rotated).unsqueeze(0)
 
     # Create an instance of the PolarRotationTransform class
-    polar_transform = PolarRotationTransform()
+    polar_transform = PolarRotationTransform(log_polar=True)
 
     original_height, original_width = images.shape[2], images.shape[3]
 
@@ -293,8 +309,7 @@ if __name__ == "__main__":
     x_y_grid = torch.tensor([x, y])
     
     # Get polar indices
-    
-    q, p = cartesian_to_polar_indices_tensor(x_y_grid, original_height, original_width)    
+    q, p = cartesian_to_polar_indices_tensor(x_y_grid, original_height, original_width, log_polar=True)    
 
     # Show the first transformed image of the batch using both methods
     plt.subplot(1, 2, 1)

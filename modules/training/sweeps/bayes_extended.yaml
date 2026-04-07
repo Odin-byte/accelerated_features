@@ -1,0 +1,23 @@
+method: bayes
+metric:
+  name: Validation/Total_Loss
+  goal: minimize
+project: xfeat_polar_patch_descriptor_matching
+early_terminate:
+  type: hyperband
+  min_iter: 3
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 5.0e-6
+    max: 2.0e-3
+  gamma_steplr:
+    distribution: uniform
+    min: 0.1
+    max: 0.95
+  dual_softmax_temp:
+    distribution: uniform
+    min: 0.2
+    max: 4.0
+  patch_size:
+    values: [16, 20, 24, 28, 32, 36, 40]

@@ -3,3 +3,5 @@ poselib
 kornia==0.7.2
 tqdm
 gdown
+wandb
+PyYAML

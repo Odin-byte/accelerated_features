@@ -1,0 +1,20 @@
+method: bayes
+metric:
+  name: Validation/Total_Loss
+  goal: minimize
+project: xfeat_polar_patch_descriptor_matching
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+  gamma_steplr:
+    distribution: uniform
+    min: 0.2
+    max: 0.9
+  dual_softmax_temp:
+    distribution: uniform
+    min: 0.5
+    max: 3.0
+  patch_size:
+    values: [16, 24, 32, 40]

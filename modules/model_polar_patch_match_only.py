@@ -127,7 +127,8 @@ class XFeatPolarPatchDescriptorGen(nn.Module):
 		for batch_patch in polar_patches:
 			# print(patch.shape)
 			x1 = self.block1(batch_patch)
-			x2 = self.block2(x1 + self.skip1(batch_patch))
+			skip = F.interpolate(self.skip1(batch_patch), size=x1.shape[-2:], mode='bilinear', align_corners=False)
+			x2 = self.block2(x1 + skip)
 			x3 = self.block3(x2)
 			x4 = self.block4(x3)
 			x5 = self.block5(x4)

@@ -59,6 +59,10 @@ def parse_arguments():
                         help='W&B project name.')
     parser.add_argument('--wandb_entity', type=str, default='dominik-w-ho',
                         help='W&B entity/team name.')
+    parser.add_argument('--early_stopping_patience', type=int, default=0,
+                        help='Number of validation checks without improvement before stopping. 0 disables early stopping.')
+    parser.add_argument('--early_stopping_min_delta', type=float, default=0.0,
+                        help='Minimum validation loss decrease required to count as an improvement.')
 
     args = parser.parse_args()
 
@@ -102,7 +106,8 @@ class Trainer():
                        training_res = (800, 608), device_num="0", dry_run = False, plot_test = False,
                        save_ckpt_every = 500, max_num_keypoints_patch_gen = 3000, val_ratio = 0.05, val_every = 500, val_batches = 10, val_seed = 42,
                        num_val_synth_imgs = 100, dual_softmax_temp = 2.0, patch_size = 41, log_polar = False,
-                       wandb_project = 'xfeat_polar_patch_descriptor_matching', wandb_entity = 'dominik-w-ho'):
+                       wandb_project = 'xfeat_polar_patch_descriptor_matching', wandb_entity = 'dominik-w-ho',
+                       early_stopping_patience = 0, early_stopping_min_delta = 0.0):
 
         self.batch_size = batch_size
         self.max_num_keypoints_patch_gen = max_num_keypoints_patch_gen
@@ -134,6 +139,8 @@ class Trainer():
             'dual_softmax_temp': dual_softmax_temp,
             'patch_size': patch_size,
             'log_polar': log_polar,
+            'early_stopping_patience': early_stopping_patience,
+            'early_stopping_min_delta': early_stopping_min_delta,
         }
 
         if wandb.run is None:
@@ -160,6 +167,10 @@ class Trainer():
         self.val_batches = val_batches
         self.val_seed = val_seed
         self.num_val_synth_imgs = num_val_synth_imgs
+        self.early_stopping_patience = max(0, int(early_stopping_patience))
+        self.early_stopping_min_delta = float(early_stopping_min_delta)
+        self.no_improve_val_checks = 0
+        self.should_stop_early = False
 
         ##################### Synthetic COCO INIT ##########################
         if model_name in ('xfeat_default', 'xfeat_synthetic'):
@@ -359,10 +370,30 @@ class Trainer():
             'Validation/Synthetic_Loss': syn_loss,
         }, step=current_step)
 
-        if total < self.best_val_total:
+        prev_best = self.best_val_total
+        if total < prev_best:
             self.best_val_total = total
             best_path = self.ckpt_save_path + f'/{self.model_name}_best.pth'
             torch.save(self.net.state_dict(), best_path)
+
+        if self.early_stopping_patience > 0:
+            improved = total < (prev_best - self.early_stopping_min_delta)
+            if improved:
+                self.no_improve_val_checks = 0
+            elif not np.isinf(total):
+                self.no_improve_val_checks += 1
+
+            self.wandb_run.log({
+                'Validation/NoImproveChecks': self.no_improve_val_checks,
+            }, step=current_step)
+
+            if self.no_improve_val_checks >= self.early_stopping_patience:
+                self.should_stop_early = True
+                print(
+                    f"Early stopping triggered at step {current_step}: "
+                    f"no improvement for {self.no_improve_val_checks} validation checks "
+                    f"(patience={self.early_stopping_patience}, min_delta={self.early_stopping_min_delta})."
+                )
 
         self.net.train()
 
@@ -488,6 +519,8 @@ class Trainer():
 
                 if (i+1) % self.val_every == 0:
                     self.validate(i+1)
+                    if self.should_stop_early:
+                        break
 
             self.wandb_run.finish()
 
@@ -517,6 +550,8 @@ def run_from_args(args):
         log_polar=args.log_polar,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
     trainer.train()
 

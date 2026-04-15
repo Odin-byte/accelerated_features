@@ -37,6 +37,8 @@ def parse_arguments():
                         help='If set, perform a dry run training with a mini-batch for sanity check.')
     parser.add_argument('--save_ckpt_every', type=int, default=500,
                         help='Save checkpoints every N steps. Default is 500.')
+    parser.add_argument('--max_num_keypoints_patch_gen', type=int, default=3000,
+                        help='Maximum number of keypoints to allowed for patch generation per image. Default is 3000.')
     parser.add_argument('--val_ratio', type=float, default=0.05,
                         help='Ratio of MegaDepth scenes to use for validation. Default is 0.05 (5%).')
     parser.add_argument('--val_every', type=int, default=500,
@@ -49,8 +51,8 @@ def parse_arguments():
                         help='Number of synthetic images to use for validation. Default is 100.')
     parser.add_argument('--dual_softmax_temp', type=float, default=2.0,
                         help='Temperature parameter for dual softmax descriptor loss. Default is 2.0.')
-    parser.add_argument('--patch_size', type=int, default=32,
-                        help='Polar patch size used by the descriptor backbone. Default is 32.')
+    parser.add_argument('--patch_size', type=int, default=41,
+                        help='Polar patch size used by the descriptor backbone. Default is 41.')
     parser.add_argument('--log_polar', action='store_true',
                         help='Whether to use log-polar coordinates. Default is False.')
     parser.add_argument('--wandb_project', type=str, default='xfeat_polar_patch_descriptor_matching',
@@ -98,11 +100,12 @@ class Trainer():
                        model_name = 'xfeat_default',
                        batch_size = 10, n_steps = 160_000, lr= 3e-4, gamma_steplr=0.5, 
                        training_res = (800, 608), device_num="0", dry_run = False, plot_test = False,
-                       save_ckpt_every = 500, val_ratio = 0.05, val_every = 500, val_batches = 10, val_seed = 42,
-                       num_val_synth_imgs = 100, dual_softmax_temp = 2.0, patch_size = 32, log_polar = False,
+                       save_ckpt_every = 500, max_num_keypoints_patch_gen = 3000, val_ratio = 0.05, val_every = 500, val_batches = 10, val_seed = 42,
+                       num_val_synth_imgs = 100, dual_softmax_temp = 2.0, patch_size = 41, log_polar = False,
                        wandb_project = 'xfeat_polar_patch_descriptor_matching', wandb_entity = 'dominik-w-ho'):
 
         self.batch_size = batch_size
+        self.max_num_keypoints_patch_gen = max_num_keypoints_patch_gen
         self.steps = n_steps
         self.dual_softmax_temp = dual_softmax_temp
         self.patch_size = patch_size
@@ -122,6 +125,7 @@ class Trainer():
             'device_num': device_num,
             'dry_run': dry_run,
             'save_ckpt_every': save_ckpt_every,
+            'max_num_keypoints_patch_gen': max_num_keypoints_patch_gen,
             'val_ratio': val_ratio,
             'val_every': val_every,
             'val_batches': val_batches,
@@ -159,11 +163,21 @@ class Trainer():
 
         ##################### Synthetic COCO INIT ##########################
         if model_name in ('xfeat_default', 'xfeat_synthetic'):
+            # Pre-split images once with a seeded RNG so val images are never
+            # seen by the train augmentor even after its periodic reloads.
+            _all_synth = sorted(glob.glob(synthetic_root_path + '/*.jpg') +
+                                glob.glob(synthetic_root_path + '/*.png'))
+            _split_rng = random.Random(val_seed)
+            _split_rng.shuffle(_all_synth)
+            _val_synth   = _all_synth[:num_val_synth_imgs]
+            _train_synth = _all_synth[num_val_synth_imgs:]
+
             self.augmentor_train = AugmentationPipe(
                                         img_dir = synthetic_root_path,
+                                        img_list = _train_synth,
                                         device = self.dev, load_dataset = True,
                                         batch_size = int(self.batch_size * 0.4 if model_name=='xfeat_default' else batch_size),
-                                        out_resolution = training_res, 
+                                        out_resolution = training_res,
                                         warp_resolution = training_res,
                                         sides_crop = 0.1,
                                         max_num_imgs = 3_000,
@@ -172,20 +186,22 @@ class Trainer():
                                         geometric = True,
                                         reload_step = 4_000
                                         )
-            
+
             self.augmentor_val = AugmentationPipe(
                                         img_dir=synthetic_root_path,
+                                        img_list=_val_synth,
                                         device=self.dev,
                                         load_dataset=True,
                                         batch_size=int(self.batch_size * 0.4 if model_name=='xfeat_default' else batch_size),
                                         out_resolution=training_res,
                                         warp_resolution=training_res,
                                         sides_crop=0.1,
-                                        max_num_imgs=3000,
+                                        max_num_imgs=0,
                                         num_test_imgs=num_val_synth_imgs,
                                         photometric=True,
                                         geometric=True,
                                         reload_step=10**12,
+                                        val_seed=val_seed,
                                     )
         else:
             self.augmentor_train = None
@@ -258,6 +274,11 @@ class Trainer():
             #Get positive correspondencies
             pts1, pts2 = positives_c[b][:, :2] * 8, positives_c[b][:, 2:] * 8
 
+            if len(pts1) > self.max_num_keypoints_patch_gen:
+                idxs = torch.randperm(len(pts1))[:self.max_num_keypoints_patch_gen]
+                pts1 = pts1[idxs]
+                pts2 = pts2[idxs]
+
             #Generate descriptors at kpts positions
             feats1 = self.net(p1[b].unsqueeze(0), pts1.unsqueeze(0)).squeeze(0)
             feats2 = self.net(p2[b].unsqueeze(0), pts2.unsqueeze(0)).squeeze(0)
@@ -302,7 +323,9 @@ class Trainer():
                 loss = self.compute_batch_loss(p1, p2, positives_md)
                 metrics['md_loss'].append(loss.item())
 
-        if self.augmentor_train is not None:
+        if self.augmentor_val is not None:
+            if hasattr(self.augmentor_val, 'reset_val_rng'):
+                self.augmentor_val.reset_val_rng()
             for _ in range(self.val_batches):
                 p1s, p2s, H1, H2 = make_batch(self.augmentor_val, difficulty=0.10, train=False)
                 h_coarse, w_coarse = p1s[0].shape[-2] // 8, p1s[0].shape[-1] // 8
@@ -424,6 +447,11 @@ class Trainer():
                     # print(f"len(positives_c[{b}]): {len(positives_c[b])}")
                     #Get positive correspondencies
                     pts1, pts2 = positives_c[b][:, :2] * 8, positives_c[b][:, 2:] * 8
+
+                    if pts1.shape[0] > self.max_num_keypoints_patch_gen:
+                        indices = torch.randperm(pts1.shape[0])[:self.max_num_keypoints_patch_gen]
+                        pts1 = pts1[indices]
+                        pts2 = pts2[indices]
 
                     #Generate descriptors at kpts positions
                     feats1 = self.net(p1[b].unsqueeze(0), pts1.unsqueeze(0)).squeeze(0)

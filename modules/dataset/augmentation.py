@@ -99,7 +99,9 @@ class AugmentationPipe(nn.Module):
                 batch_size = 1,
                 photometric = True,
                 geometric = True,
-                reload_step = 1_000
+                reload_step = 1_000,
+                img_list = None,
+                val_seed = None
                 ):
         super(AugmentationPipe, self).__init__()
         self.half = 16
@@ -116,12 +118,17 @@ class AugmentationPipe(nn.Module):
         self.dims_s = torch.tensor([ self.dims_t[0,0,0] / out_resolution[0],
                                      self.dims_t[0,0,1] / out_resolution[1]]).float().to(device).view(1,1,2) 
 
-        self.all_imgs = glob.glob(img_dir + '/*.jpg') + glob.glob(img_dir + '/*.png')
+        if img_list is not None:
+            self.all_imgs = list(img_list)
+        else:
+            self.all_imgs = glob.glob(img_dir + '/*.jpg') + glob.glob(img_dir + '/*.png')
         
         self.photometric = photometric
         self.geometric = geometric
         self.cnt = 1
         self.reload_step = reload_step
+        self.val_seed = val_seed
+        self.val_call_idx = 0
 
         list_augmentation = [
                         #kornia.augmentation.RandomChannelShuffle(p=0.5),
@@ -140,7 +147,7 @@ class AugmentationPipe(nn.Module):
         if load_dataset:
             print('[Synthetic] Found a total of ', len(self.all_imgs), ' images for training..')
 
-            if len(self.all_imgs) - num_test_imgs < max_num_imgs:
+            if img_list is None and len(self.all_imgs) - num_test_imgs < max_num_imgs:
                 raise RuntimeError('Error: test set overlaps with training set! Decrease number of test imgs')
 
             self.load_imgs()
@@ -224,84 +231,111 @@ class AugmentationPipe(nn.Module):
 
         """
 
-        if self.cnt % self.reload_step == 0:
-            self.load_imgs()
+        py_state = None
+        np_state = None
+        torch_state = None
+        cuda_states = None
+        restore_rng = test and self.val_seed is not None
+        if restore_rng:
+            py_state = random.getstate()
+            np_state = np.random.get_state()
+            torch_state = torch.random.get_rng_state()
+            cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            seed = int(self.val_seed if self.val_seed is not None else 0) + self.val_call_idx
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
 
-        if self.geometric is False:
-            difficulty = 0.
+        try:
+            if self.cnt % self.reload_step == 0:
+                self.load_imgs()
 
-        with torch.no_grad():
-            x = (x/255.).to(self.device)
-            b, c, h, w = x.shape
-            shape = (h, w)
-              
-            ######## Geometric Transformations
+            if self.geometric is False:
+                difficulty = 0.
 
-            H = torch.tensor(np.array([generateRandomHomography(shape, difficulty) for b in range(self.batch_size)]),
-                               dtype = torch.float32).to(self.device)
-            
-            output = kornia.geometry.transform.warp_perspective(x, H,
-                            dsize = shape, padding_mode = 'zeros')
-
-            #crop % of image boundaries each side to reduce invalid pixels after warps
-            low_h = int(h * self.sides_crop); low_w = int(w*self.sides_crop)
-            high_h = int(h*(1. - self.sides_crop)); high_w= int(w * (1. - self.sides_crop))
-            output = output[..., low_h:high_h, low_w:high_w]
-            x = x[..., low_h:high_h, low_w:high_w]
-
-            #apply TPS if desired:
-            if TPS:
+            with torch.no_grad():
+                x = (x/255.).to(self.device)
+                b, c, h, w = x.shape
+                shape = (h, w)
                 src, weights, A = None, None, None
-                for b in range(self.batch_size):
-                    b_src, b_weights, b_A = generateRandomTPS(shape, (8,6), difficulty, prob = prob_deformation)
-                    b_src, b_weights, b_A = b_src.to(self.device), b_weights.to(self.device), b_A.to(self.device)
 
-                    if src is None:
-                        src, weights, A = b_src, b_weights, b_A
-                    else:
-                        src = torch.cat((b_src, src))
-                        weights = torch.cat((b_weights, weights))
-                        A = torch.cat((b_A, A))
+                ######## Geometric Transformations
 
-                output = warp_image_tps(output, src, weights, A)
+                H = torch.tensor(np.array([generateRandomHomography(shape, difficulty) for b in range(self.batch_size)]),
+                                   dtype = torch.float32).to(self.device)
 
-            output = F.interpolate(output, self.out_resolution[::-1], mode = 'nearest')
-            x = F.interpolate(x, self.out_resolution[::-1], mode = 'nearest')
+                output = kornia.geometry.transform.warp_perspective(x, H,
+                                dsize = shape, padding_mode = 'zeros')
 
-            mask = ~torch.all(output == 0, dim=1, keepdim=True)
-            mask = mask.expand(-1,3,-1,-1)
+                #crop % of image boundaries each side to reduce invalid pixels after warps
+                low_h = int(h * self.sides_crop); low_w = int(w*self.sides_crop)
+                high_h = int(h*(1. - self.sides_crop)); high_w= int(w * (1. - self.sides_crop))
+                output = output[..., low_h:high_h, low_w:high_w]
+                x = x[..., low_h:high_h, low_w:high_w]
 
-            # Make-up invalid regions with texture from the batch
-            rv = 1 if not TPS else 2
-            output_shifted = torch.roll(x, rv, 0)
-            output[~mask] = output_shifted[~mask]
-            mask = mask[:, 0, :, :]
+                #apply TPS if desired:
+                if TPS:
+                    src, weights, A = None, None, None
+                    for b in range(self.batch_size):
+                        b_src, b_weights, b_A = generateRandomTPS(shape, (8,6), difficulty, prob = prob_deformation)
+                        b_src, b_weights, b_A = b_src.to(self.device), b_weights.to(self.device), b_A.to(self.device)
 
-            ######## Photometric Transformations
-            output = self.aug_list(output)
+                        if src is None:
+                            src, weights, A = b_src, b_weights, b_A
+                        else:
+                            src = torch.cat((b_src, src))
+                            weights = torch.cat((b_weights, weights))
+                            A = torch.cat((b_A, A))
 
-            b, c, h, w = output.shape
-            #Correlated Gaussian Noise
-            if np.random.uniform() > 0.5 and self.photometric:
-                noise = F.interpolate(torch.randn_like(output)*(10/255), (h//2, w//2))
-                noise = F.interpolate(noise, (h, w), mode = 'bicubic')
-                output = torch.clip( output + noise, 0., 1.)
+                    output = warp_image_tps(output, src, weights, A)
 
-            #Random shadows
-            if np.random.uniform() > 0.6 and self.photometric:
-                noise = torch.rand((b, 1, h//64, w//64), device = self.device) * 1.3
-                noise = torch.clip(noise, 0.25, 1.0)
-                noise = F.interpolate(noise, (h, w), mode = 'bicubic')
-                noise = noise.expand(-1, 3, -1, -1)
-                output *= noise
-                output = torch.clip( output, 0., 1.)
+                output = F.interpolate(output, self.out_resolution[::-1], mode = 'nearest')
+                x = F.interpolate(x, self.out_resolution[::-1], mode = 'nearest')
 
-            self.cnt+=1
+                mask = ~torch.all(output == 0, dim=1, keepdim=True)
+                mask = mask.expand(-1,3,-1,-1)
 
-        if TPS:
-            return output, (H, src, weights, A, mask)
-        else:
-            return output, (H, mask)
+                # Make-up invalid regions with texture from the batch
+                rv = 1 if not TPS else 2
+                output_shifted = torch.roll(x, rv, 0)
+                output[~mask] = output_shifted[~mask]
+                mask = mask[:, 0, :, :]
+
+                ######## Photometric Transformations
+                output = self.aug_list(output)
+
+                b, c, h, w = output.shape
+                #Correlated Gaussian Noise
+                if np.random.uniform() > 0.5 and self.photometric:
+                    noise = F.interpolate(torch.randn_like(output)*(10/255), (h//2, w//2))
+                    noise = F.interpolate(noise, (h, w), mode = 'bicubic')
+                    output = torch.clip( output + noise, 0., 1.)
+
+                #Random shadows
+                if np.random.uniform() > 0.6 and self.photometric:
+                    noise = torch.rand((b, 1, h//64, w//64), device = self.device) * 1.3
+                    noise = torch.clip(noise, 0.25, 1.0)
+                    noise = F.interpolate(noise, (h, w), mode = 'bicubic')
+                    noise = noise.expand(-1, 3, -1, -1)
+                    output *= noise
+                    output = torch.clip( output, 0., 1.)
+
+                self.cnt+=1
+
+            if TPS:
+                return output, (H, src, weights, A, mask)
+            else:
+                return output, (H, mask)
+        finally:
+            if restore_rng and py_state is not None and np_state is not None and torch_state is not None:
+                random.setstate(py_state)
+                np.random.set_state(np_state)
+                torch.random.set_rng_state(torch_state)
+                if cuda_states is not None:
+                    torch.cuda.set_rng_state_all(cuda_states)
+                self.val_call_idx += 1
 
     def get_correspondences(self, kps_target, T):
         H, H2, src, W, A = T
@@ -312,3 +346,6 @@ class AugmentationPipe(nn.Module):
         warped_to_src = self.warp_points(H@torch.inverse(H2), undeformed)
 
         return warped_to_src
+
+    def reset_val_rng(self):
+        self.val_call_idx = 0

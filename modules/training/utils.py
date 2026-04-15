@@ -89,8 +89,8 @@ def make_batch(augmentor, difficulty = 0.3, train = True):
 
         batch_images = torch.cat(batch_images)
 
-        p1, H1 = augmentor(batch_images, difficulty)
-        p2, H2 = augmentor(batch_images, difficulty, TPS = True, prob_deformation = 0.7)
+        p1, H1 = augmentor(batch_images, difficulty, test = (not train))
+        p2, H2 = augmentor(batch_images, difficulty, TPS = True, prob_deformation = 0.7, test = (not train))
 
     return p1, p2, H1, H2
 

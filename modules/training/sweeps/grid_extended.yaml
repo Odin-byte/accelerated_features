@@ -1,0 +1,13 @@
+method: grid
+metric:
+  name: Validation/Total_Loss
+  goal: minimize
+project: xfeat_polar_patch_descriptor_matching
+early_terminate:
+  type: hyperband
+  min_iter: 3
+parameters:
+  patch_size:
+    values: [9, 17, 33, 65, 129, 257]
+  log_polar:
+    values: [true, false]
